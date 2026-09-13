@@ -1,0 +1,12 @@
+{
+  "core": "../muz-core",
+  "demos": [
+    {
+      "id": "still-our-own",
+      "title": "Still Our Own",
+      "directory": "../muz-projects/still-our-own",
+      "entry": "song.muz",
+      "entries": ["song.muz", "demo.muz"]
+    }
+  ]
+}

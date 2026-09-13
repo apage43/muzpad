@@ -1,0 +1,10 @@
+/*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  X-Frame-Options: DENY
+/catalog.json
+  Cache-Control: no-cache
+/muz.wasm
+  Cache-Control: no-cache
+/player-worklet.js
+  Cache-Control: no-cache
