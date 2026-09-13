@@ -31,6 +31,7 @@ export async function buildCatalog(configPath) {
     ...(await sources(resolve(core, "std"), "std/")),
     ...(await sources(resolve(core, "contrib"), "contrib/")),
     ...(await sources(resolve(core, "docs"), "docs/")),
+    ...(await sources(resolve(core, "examples"), "examples/")),
   };
   const packages = Object.keys(libraries)
     .filter((p) => p.startsWith("contrib/") && p.endsWith("/README.md"))

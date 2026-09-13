@@ -380,7 +380,7 @@ function tree() {
     ),
     "library",
   );
-  const coreFolders = ["std", "contrib", "docs"]
+  const coreFolders = ["std", "contrib", "docs", "examples"]
     .map((folder) => {
       const items = Object.fromEntries(
         Object.entries(catalog.libraries).filter(([p]) =>

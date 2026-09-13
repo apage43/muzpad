@@ -7,7 +7,12 @@ import { buildCatalog } from "../scripts/catalog.mjs";
 test("catalog includes gist links without bundling pieces, plus the full core tree", async () => {
   const root = await mkdtemp(join(tmpdir(), "muzpad-catalog-"));
   try {
-    for (const dir of ["core/std", "core/docs", "core/contrib/nested/pack"])
+    for (const dir of [
+      "core/std",
+      "core/docs",
+      "core/examples",
+      "core/contrib/nested/pack",
+    ])
       await mkdir(join(root, dir), { recursive: true });
     await writeFile(join(root, "core/README.md"), "# muz");
     await writeFile(join(root, "core/docs/guide.md"), "# Guide");

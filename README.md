@@ -27,7 +27,7 @@ preserved across revisions.
 
 ## Workspace
 
-- Browse project files and gist links, with muz-core's README, std, contrib, and docs
+- Browse project files and gist links, with muz-core's README, std, contrib, docs, and examples
   together under one section. Markdown opens as formatted documentation, with
   relative links to included documents and source files opening in the workbench.
 - Open a local folder or project ZIP. Relative imports stay relative to their
@@ -93,7 +93,7 @@ server must serve JavaScript, WASM, JSON and other files with their usual MIME
 types. Localhost is also a secure context for development.
 
 `build.config.json` selects optional sidebar gist links and the muz-core checkout.
-Only the core README and std/contrib/docs are bundled; project contents are fetched on demand from
+Only the core README and std/contrib/docs/examples are bundled; project contents are fetched on demand from
 GitHub. No muz-projects checkout is needed to build muzpad. Each `gists` item has
 `gist` (ID or URL), `title`, and optional `description`; use an empty list for no
 suggestions. Set `MUZPAD_BUILD_CONFIG` for another configuration file (paths are
