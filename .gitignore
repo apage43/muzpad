@@ -5,3 +5,5 @@ public/muz.wasm
 public/catalog.json
 test-results/
 .wrangler/
+public/engine-build.json
+.artifacts/

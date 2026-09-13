@@ -1,6 +1,7 @@
 import { readFile, writeFile, readdir, mkdir } from "node:fs/promises";
 import { resolve, extname, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseGist } from "../src/gist.js";
 
 export async function sources(dir, prefix = "") {
   const files = {};
@@ -44,27 +45,12 @@ export async function buildCatalog(configPath) {
         requirements.push("Native plugins");
       return { directory, readme, requirements };
     });
-  const demos = [],
-    ids = new Set();
-  for (const demo of config.demos ?? []) {
-    if (!demo.id || ids.has(demo.id))
-      throw new Error("Each bundled project needs a unique id");
-    ids.add(demo.id);
-    const files = await sources(resolve(root, demo.directory));
-    const entries = [...new Set([demo.entry, ...(demo.entries ?? [])])];
-    for (const entry of entries)
-      if (!files[entry] || !entry.endsWith(".muz"))
-        throw new Error(`Missing entry ${entry} in ${demo.id}`);
-    demos.push({
-      id: demo.id,
-      title: demo.title || demo.id,
-      description: demo.description || "",
-      entry: demo.entry,
-      entries,
-      files,
-    });
-  }
-  return { libraries, packages, demos };
+  const gists = (config.gists ?? []).map((item) => ({
+    gist: parseGist(item.gist),
+    title: item.title || "Untitled gist",
+    description: item.description || "",
+  }));
+  return { libraries, packages, gists };
 }
 export async function writeCatalog(root) {
   const config = resolve(
@@ -78,7 +64,7 @@ export async function writeCatalog(root) {
     JSON.stringify(catalog),
   );
   console.log(
-    `Bundled ${catalog.demos.length} project(s), ${Object.keys(catalog.libraries).length} library files`,
+    `Catalog: ${catalog.gists.length} gist link(s), ${Object.keys(catalog.libraries).length} library files`,
   );
 }
 if (

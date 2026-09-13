@@ -18,16 +18,16 @@ npm run prepare:engine
 npm run dev
 ```
 
-Open the URL printed by Vite. The initial build includes Still Our Own from the
-sibling muz-projects checkout. It compiles locally on opening; press Play to
-enable browser audio. Rebuild, or Cmd/Ctrl+Enter in the editor, accepts a new source
+Open the URL printed by Vite. Choose Still Our Own from the Gists sidebar to
+load its source from GitHub, or start with the new project. Imported gists compile
+locally on opening; press Play to enable browser audio. Rebuild, or Cmd/Ctrl+Enter in the editor, accepts a new source
 revision. Invalid edits retain the previous accepted session. A successful run
 rebuilds audio at the current position; held voices and effect tails are not
 preserved across revisions.
 
 ## Workspace
 
-- Browse project files, bundled projects, and muz-core's std, contrib, and docs
+- Browse project files and gist links, with muz-core's std, contrib, and docs
   together under one section. Markdown opens as formatted documentation, with
   relative links to included documents and source files opening in the workbench.
 - Open a local folder or project ZIP. Relative imports stay relative to their
@@ -42,7 +42,7 @@ preserved across revisions.
   remain available in browsers without mounting support.
 - Edit multiple source files, format them with muz's formatter, add files, and
   choose the compilation entry. Bundled libraries are read only.
-- The Entry chooser lists only files the compiler validates as playable entry
+- The Entrypoints chooser lists only files the compiler validates as playable entry
   points, with declared entries first. Validation refreshes after source edits.
   Choosing one changes what the next Rebuild compiles.
 - Play/pause, stop, restart, seek on the ruler or by section, and loop a section
@@ -56,9 +56,14 @@ preserved across revisions.
 - Click a diagnostic or the related-source action to navigate to a declaration.
   Source attribution is best effort for generated material. Graph links refer
   to the accepted revision; unsaved edits can move those source lines.
-- Download your own project as a ZIP; bundled demos do not offer ZIP downloads. Local draft recovery is browser storage,
-  not a replacement for downloads; clearing site data removes drafts. Previous
-  workspace restores the preceding project when switching projects.
+- Import a gist URL or ID. The page URL gains `?gist=ID` so it can be shared;
+  `?gist=ID/REVISION` pins a particular version. A gist workspace has a **View gist**
+  link in place of the project download button. Edits stay in browser storage and
+  are not published back to GitHub or included in a shared link. Reloading restores
+  local edits for the same gist; explicitly importing it again fetches the saved gist.
+- Download folder/ZIP/new projects as ZIPs. Local draft recovery uses browser
+  storage; clearing site data removes drafts. Previous workspace restores the
+  preceding project when switching projects.
 
 Visualizations are read only. Selecting notes or graph objects does not edit the
 music. Scope and spectrum show actual selected output; note marks show compiled
@@ -87,22 +92,57 @@ worker, cross-origin-isolation headers, or SharedArrayBuffer is required. The
 server must serve JavaScript, WASM, JSON and other files with their usual MIME
 types. Localhost is also a secure context for development.
 
-`build.config.json` selects demo directories and their entry files. The build
-reads source from those directories and bundles std/contrib/docs from muz-core. It
-excludes hidden directories, asset folders, and generated media. Music remains
-in muz-projects; the browser bundle is generated and ignored by git. The default
-demo needs no external samples or plugins. Customize the demo list for builds
-that should include different projects or no projects.
+`build.config.json` selects optional sidebar gist links and the muz-core checkout.
+Only std/contrib/docs are bundled; project contents are fetched on demand from
+GitHub. No muz-projects checkout is needed to build muzpad. Each `gists` item has
+`gist` (ID or URL), `title`, and optional `description`; use an empty list for no
+suggestions. Set `MUZPAD_BUILD_CONFIG` for another configuration file (paths are
+relative to that file). `npm run prepare:catalog` refreshes the library and links.
+The configured core path must match the WASM crate's Cargo dependency.
 
-Each `demos` entry has `id`, `title`, `directory`, `entry`, optional `entries`, and
-optional `description`. There is no project-specific runtime code. Paths are
-relative to the configuration file. Set `MUZPAD_BUILD_CONFIG` to use a different
-configuration; `npm run prepare:catalog` refreshes just the bundled files.
+Gists are read anonymously, including secret gists when their link is known.
+**Secret means unlisted, not access-controlled**; links included in the sidebar are
+visible to site visitors. Loading requires GitHub access and is subject to its
+anonymous API rate limits. Already recovered local drafts work without refetching.
+No GitHub token is stored in the application.
 
-The production Cloudflare configuration serves `dist/` as static assets at
-`muzpad.plausiblyreliable.com`, without application code or storage bindings.
-After signing in with Wrangler, `npm run deploy` builds and publishes it, or use
-`npx wrangler deploy` to publish an already validated build.
+Gists support `.muz` and `.md` files, plus optional `muzpad.json` with `title`,
+`entry`, `entries`, and `paths`. Because gist filenames cannot contain folders,
+`paths` maps flat gist filenames to project-relative paths, for example
+`{"paths":{"voice.muz":"parts/voice.muz"},"entry":"song.muz"}`. Files import into
+an editable local workspace; Markdown is rendered with the same HTML sanitization
+as local documents. Without metadata, the entry defaults to `song.muz` or the first
+muz file; the compiler then discovers valid entrypoints.
+
+To explicitly publish a local piece as a **secret** gist using your authenticated
+GitHub CLI account:
+
+```sh
+npm run gist:create -- ../muz-projects/my-piece song.muz "My piece"
+```
+
+This command creates a new gist each time. It includes source and Markdown,
+encodes nested filenames with a path manifest, and excludes hidden directories,
+assets, and generated media. Builds and deployments never create gists.
+
+The Cloudflare configuration serves `dist/` at `muzpad.plausiblyreliable.com`.
+Deploy only when requested. After signing in with Wrangler:
+
+```sh
+npm run deploy                         # build and publish the site
+npm run deploy -- --source-archive      # also upload the engine source to R2
+npm run deploy -- --source-archive --dry-run  # local build/archive, no remote writes
+```
+
+The optional archive step uses `sourceArchive.bucket`, `prefix`, and `baseUrl`
+from the build configuration. It requires a clean muz-core checkout at the exact
+commit recorded during the WASM build, verifies the WASM checksum, and creates
+`COMMIT.tgz` with the tracked engine source. It uploads to
+`plausibly-ml/muz-core/COMMIT.tgz`, checks the public URL, and only then includes a
+`.tgz` link beside muz-core and deploys. Failure leaves the site unpublished.
+Normal deployments omit the link. Archives are generated under ignored
+`.artifacts/`; they are never bundled into the site. `dist/engine-build.json`
+records the core commit, clean state, and WASM SHA-256.
 
 ## Runtime
 
@@ -127,7 +167,7 @@ note/automation/patch editing, or seamless live device
 reconciliation. Large or expensive programs can exceed browser memory/CPU budgets;
 the UI reports audio underruns rather than claiming glitch-free playback.
 
-The first timing check through the WASM bridge compiled the full demo in roughly
+The first timing check through the WASM bridge compiled Still Our Own in roughly
 0.2 seconds, prepared it in 0.05 seconds, and rendered a 5.3-second chorus passage
 in 1.2 seconds with about 79 MiB of WASM memory. These are measurements on the
 development machine, not performance guarantees.
@@ -149,4 +189,4 @@ uses real Chromium browser file handles with a substituted OS folder picker to
 exercise writes, new nested files, and external-edit conflicts.
 Set `CHROMIUM_PATH` to use an existing Chromium executable. Engine embedding tests
 live in muz-core and use small independent cases. Still Our Own is a manual
-integration demo, not a frozen regression fixture.
+integration piece, not a frozen regression fixture.

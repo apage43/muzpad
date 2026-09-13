@@ -12,7 +12,8 @@
     "test:browser": "playwright test",
     "format": "prettier --write src scripts tests public/player-worklet.js index.html *.json *.ts README.md",
     "prepare:catalog": "node scripts/catalog.mjs",
-    "deploy": "npm run build && wrangler deploy"
+    "deploy": "node scripts/deploy.mjs",
+    "gist:create": "node scripts/create-gist.mjs"
   },
   "dependencies": {
     "@codemirror/commands": "^6.11.0",

@@ -1,12 +1,15 @@
 {
   "core": "../muz-core",
-  "demos": [
+  "gists": [
     {
-      "id": "still-our-own",
+      "gist": "780004d83ed44fade4faacbb44b96637",
       "title": "Still Our Own",
-      "directory": "../muz-projects/still-our-own",
-      "entry": "song.muz",
-      "entries": ["song.muz", "demo.muz"]
+      "description": "A piece for native muz instruments"
     }
-  ]
+  ],
+  "sourceArchive": {
+    "bucket": "plausibly-ml",
+    "prefix": "muz-core",
+    "baseUrl": "https://ml.plausiblyreliable.com/muz-core"
+  }
 }
