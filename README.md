@@ -43,7 +43,9 @@ preserved across revisions.
   writing; conflicts leave browser edits available for ZIP download. Mounts last
   for this tab session. After refreshing the page, the recovered draft is a browser copy.
   **Reload** rereads the mounted folder, including added/deleted files and entry
-  metadata, and automatically rebuilds. It preserves the latest browser copy in
+  metadata, and automatically rebuilds the selected entrypoint if its file still
+  exists, falling back to the folder's default entrypoint if it was removed.
+  It preserves the latest browser copy in
   Previous workspace before replacing it. Read failures keep the current workspace.
   Mounting again opens the current disk files; a recovered draft is clearly labeled
   disconnected. Folder import and ZIP download remain available in browsers without mounting support.

@@ -248,7 +248,7 @@ $("reload-folder").onclick = async () => {
     const files = await readFolder(target.root);
     if (mount !== target || project !== current) return;
     const connected = new MountedFolder(target.root, files);
-    const build = importProject(files, target.root.name, true);
+    const build = importProject(files, target.root.name, true, current.entry);
     mount = connected;
     project.folderName = target.root.name;
     mountedSettings = projectDiskFiles()["muzpad.json"];
@@ -847,6 +847,7 @@ function importProject(
   files: Record<string, string>,
   title: string,
   preserveRequired = false,
+  preferredEntry?: string,
 ) {
   validateFiles(files);
   let settings: any = {};
@@ -854,11 +855,14 @@ function importProject(
     settings = JSON.parse(files["muzpad.json"] ?? "{}");
   } catch {}
   delete files["muzpad.json"];
-  const entry = files[settings.entry]
-    ? settings.entry
-    : files["song.muz"]
-      ? "song.muz"
-      : Object.keys(files).find((p) => p.endsWith(".muz"))!;
+  const entry =
+    preferredEntry !== undefined && files[preferredEntry] !== undefined
+      ? preferredEntry
+      : files[settings.entry]
+        ? settings.entry
+        : files["song.muz"]
+          ? "song.muz"
+          : Object.keys(files).find((p) => p.endsWith(".muz"))!;
   preserveProject(preserveRequired);
   return openProject({
     id: title.replace(/[^a-z0-9-]/gi, "-"),

@@ -531,6 +531,67 @@ test("mounted folder saves source and new files, and refuses external changes", 
   await expect(page.locator("#download")).toBeVisible();
 });
 
+test("mounted folder reload rebuilds the selected entry instead of the disk default", async ({
+  page,
+  browserName,
+}) => {
+  test.skip(browserName !== "chromium", "Requires writable directory handles");
+  await page.addInitScript(() => {
+    (window as any).showDirectoryPicker = async () => {
+      const root = await navigator.storage.getDirectory();
+      for (const [path, source] of Object.entries({
+        "muzpad.json": JSON.stringify({ entry: "song.muz" }),
+        "song.muz":
+          'song({tracks:[track("default", phrase("C4:q"), synth("init"))],tail:0.1})',
+        "audition.muz":
+          'song({tracks:[track("audition", phrase("D4:q"), synth("init"))],tail:0.1})',
+      })) {
+        const writer = await (
+          await root.getFileHandle(path, { create: true })
+        ).createWritable();
+        await writer.write(source);
+        await writer.close();
+      }
+      return {
+        kind: "directory",
+        name: "Audition project",
+        values: (root as any).values.bind(root),
+        getDirectoryHandle: root.getDirectoryHandle.bind(root),
+        getFileHandle: root.getFileHandle.bind(root),
+        queryPermission: async () => "granted",
+        requestPermission: async () => "granted",
+      };
+    };
+  });
+  await page.goto("./");
+  await page.locator("#mount-folder").click();
+  await expect(page.locator("#project-title")).toHaveText("Audition project");
+  await expect(page.locator("#build-state")).toHaveText("Accepted");
+  await page.locator("#entry-select").selectOption("audition.muz");
+  await expect(page.locator("#entry-label")).toHaveText(
+    "Active entry: song.muz",
+  );
+  await page.evaluate(async () => {
+    const root = await navigator.storage.getDirectory();
+    const writer = await (
+      await root.getFileHandle("audition.muz")
+    ).createWritable();
+    await writer.write(
+      'song({tracks:[track("audition_updated", phrase("E4:q"), synth("init"))],tail:0.1})',
+    );
+    await writer.close();
+  });
+  await page.locator("#reload-folder").click();
+  await expect(
+    page.locator("#analysis-source option[value='audition_updated']"),
+  ).toHaveCount(1);
+  await expect(page.locator("#build-state")).toHaveText("Accepted");
+  await expect(page.locator("#entry-select")).toHaveValue("audition.muz");
+  await expect(page.locator("#source-path")).toHaveText("audition.muz");
+  await expect(page.locator("#entry-label")).not.toContainText("song.muz");
+  await expect(page.locator("#workspace-mode")).toHaveText("Folder connected");
+});
+
 test("Entrypoints excludes helper modules and refreshes after edits", async ({
   page,
 }) => {
