@@ -182,16 +182,16 @@ input::placeholder {
   flex-direction: column;
 }
 .topbar {
-  height: 64px;
+  height: 48px;
   flex-shrink: 0;
   border-bottom: 1px solid var(--c-383838);
   display: flex;
   align-items: center;
-  padding: 0 20px;
+  padding: 0 14px;
   gap: 24px;
 }
 .brand {
-  font-size: 24px;
+  font-size: 22px;
   letter-spacing: -1.1px;
   font-weight: 600;
   display: flex;
@@ -200,8 +200,9 @@ input::placeholder {
   min-width: 158px;
 }
 .brand-mark {
-  font-size: 38px;
+  font-size: 30px;
   font-weight: 400;
+  line-height: 1;
 }
 .alpha {
   font-size: 10px;
@@ -230,11 +231,11 @@ input::placeholder {
   color: var(--c-eee);
 }
 .transport {
-  min-height: 62px;
+  min-height: 46px;
   display: flex;
   align-items: center;
   gap: 14px;
-  padding: 10px 20px;
+  padding: 6px 14px;
   border-bottom: 1px solid var(--c-444);
   flex-wrap: wrap;
 }
@@ -450,7 +451,7 @@ input::placeholder {
 .explorer-foot {
   font-size: 9px;
   color: var(--c-777);
-  padding: 16px 12px;
+  padding: 10px 12px;
   border-top: 1px solid var(--c-262626);
   line-height: 1.6;
 }
@@ -629,7 +630,7 @@ input::placeholder {
 .source-foot {
   display: flex;
   justify-content: space-between;
-  padding: 10px 12px;
+  padding: 6px 12px;
   border-top: 1px solid var(--c-262626);
   font-size: 9px;
   color: var(--c-777);
@@ -815,7 +816,7 @@ dd {
   height: 70px;
 }
 .diagnostics {
-  min-height: 57px;
+  min-height: 28px;
   max-height: 190px;
   border-top: 1px solid var(--c-444);
   flex-shrink: 0;
@@ -826,7 +827,7 @@ dd {
   display: flex;
   align-items: center;
   gap: 15px;
-  padding: 12px 16px;
+  padding: 7px 12px;
   font-size: 10px;
 }
 #build-state {
@@ -840,7 +841,7 @@ dd {
   color: var(--c-999);
 }
 #diagnostic-list {
-  padding: 0 16px 8px;
+  padding: 0 12px 8px;
   color: var(--c-bbb);
   font-size: 11px;
   line-height: 1.6;
@@ -988,7 +989,7 @@ dialog form > div {
   }
   .topbar {
     height: auto;
-    padding: 14px;
+    padding: 6px 12px;
     flex-wrap: wrap;
   }
   .project-title {
@@ -999,7 +1000,7 @@ dialog form > div {
     justify-content: space-between;
   }
   .transport {
-    padding: 10px 12px;
+    padding: 6px 12px;
   }
   .workspace {
     grid-template-columns: 130px minmax(0, 1fr);
@@ -1042,7 +1043,7 @@ dialog form > div {
     min-width: 80px;
   }
   .diagnostics {
-    min-height: 60px;
+    min-height: 28px;
   }
   dl {
     grid-template-columns: 1fr;
@@ -1133,7 +1134,7 @@ dialog form > div {
   display: block;
   font-size: 10px;
   color: var(--c-999);
-  margin-top: 5px;
+  margin-top: 3px;
 }
 .topbar {
   gap: 16px;
@@ -1223,8 +1224,8 @@ select:focus-visible {
 @media (max-width: 1100px) {
   .topbar {
     height: auto;
-    min-height: 64px;
-    padding: 10px 14px;
+    min-height: 48px;
+    padding: 6px 14px;
     flex-wrap: wrap;
     gap: 12px;
   }
