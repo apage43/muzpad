@@ -72,10 +72,10 @@ if (archive) {
       throw new Error(
         `Archive uploaded but ${url} is not accessible (${check.status}); site was not deployed.`,
       );
-    const path = resolve(root, "dist/catalog.json");
-    const catalog = JSON.parse(await readFile(path, "utf8"));
+    const catalogPath = resolve(root, "dist/catalog.json");
+    const catalog = JSON.parse(await readFile(catalogPath, "utf8"));
     catalog.engine.sourceArchive = url;
-    await writeFile(path, JSON.stringify(catalog));
+    await writeFile(catalogPath, JSON.stringify(catalog));
   }
 }
 if (dryRun) console.log("Dry run complete. No R2 upload or live deployment.");
