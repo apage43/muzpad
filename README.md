@@ -37,10 +37,10 @@ preserved across revisions.
 - The header distinguishes **Folder connected** from **Browser copy**, shows the
   folder's unsaved-file count, and groups current-workspace actions separately
   from opening other projects. Gist copies explicitly say that edits stay local.
-- Mount a folder in browsers with the writable directory picker. **Save to
+- Connect a folder in browsers with the writable directory picker. **Save to
   folder** (Cmd/Ctrl+S) writes changed files and entry metadata back to that folder,
   including new nested source files. Saving checks for outside edits before
-  writing; conflicts leave browser edits available for ZIP download. Mounts last
+  writing; conflicts leave browser edits available for ZIP download. Folder connections last
   for this tab session. After refreshing the page, the recovered draft is a browser copy.
   **Reload** rereads the mounted folder, including added/deleted files and entry
   metadata, and automatically rebuilds the selected entrypoint if its file still
@@ -49,7 +49,7 @@ preserved across revisions.
   playback continues during rebuilding and failed builds keep the accepted audio.
   It preserves the latest browser copy in
   Previous workspace before replacing it. Read failures keep the current workspace.
-  Mounting again opens the current disk files; a recovered draft is clearly labeled
+  Connecting again opens the current disk files; a recovered draft is clearly labeled
   disconnected. Folder import and ZIP download remain available in browsers without mounting support.
 - Edit multiple source files, format them with muz's formatter, add files, and
   choose the compilation entry. Bundled libraries are read only.

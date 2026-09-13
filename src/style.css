@@ -226,10 +226,6 @@ input::placeholder {
   background: transparent;
   color: var(--c-aaa);
 }
-.top-actions button:last-child {
-  border-color: var(--c-555);
-  color: var(--c-eee);
-}
 .transport {
   min-height: 46px;
   display: flex;
