@@ -105,7 +105,6 @@ test("new project, local draft recovery, and switchable paper theme", async ({
   await page.locator("#theme-toggle").click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   await page.locator("#new-project").click();
-  await page.locator("#run").click();
   await expect(page.locator("#build-state")).toHaveText("Accepted");
   await expect(page.locator("#build-detail")).toContainText("1 tracks");
   await page.reload();
@@ -130,13 +129,22 @@ test("folder import retains relative modules and switches the entry file", async
     await expect(page.locator("#build-state")).toHaveText("Accepted");
     await page.locator("#folder-input").setInputFiles(dir);
     await expect(page.locator('[data-file="production.muz"]')).toBeVisible();
+    await expect(page.locator("#build-state")).toHaveText("Accepted");
     await page.locator('[data-file="production.muz"]').click();
     await page.locator("#set-entry").click();
+    await expect(page.locator("#entry-notice")).toHaveText(
+      "Rebuild to use production.muz · song.muz is still active",
+    );
+    await expect(page.locator("#entry-label")).toHaveText(
+      "Active entry: song.muz",
+    );
+    await expect(page.locator("#build-state")).toHaveText("Accepted");
     await page.locator("#run").click();
     await expect(page.locator("#build-state")).toHaveText("Accepted");
     await expect(page.locator("#entry-label")).toHaveText(
       "Entry: production.muz",
     );
+    await expect(page.locator("#entry-notice")).toBeHidden();
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -254,7 +262,7 @@ let note = phrase("C4:q");
   await expect(page.locator("#build-state")).toHaveText("Accepted");
   const core = page.locator(".core-tree");
   await expect(core.locator(":scope > summary")).toHaveText("muz-core");
-  await expect(core.locator(":scope > details")).toHaveCount(3);
+  await expect(core.locator(":scope > details")).toHaveCount(4);
   await core.locator('[data-core-folder="docs"] > summary').click();
   await core.locator('[data-file="docs/embedding.md"]').click();
   await expect(page.locator("#document h1")).toHaveText("Embedding muz");
@@ -318,7 +326,7 @@ test("nested libraries, entry selection, inspector visibility, and analysis sour
   await page.locator("#entry-select").selectOption("production.muz");
   await expect(page.locator("#source-path")).toHaveText("production.muz");
   await expect(page.locator("#entry-label")).toHaveText(
-    "Entry: production.muz",
+    "Active entry: song.muz",
   );
   await page.locator("#run").click();
   await expect(page.locator("#build-state")).toHaveText("Accepted");
@@ -369,7 +377,11 @@ test("mounted folder saves source and new files, and refuses external changes", 
       return {
         kind: "directory",
         name: "Mounted project",
-        values: (root as any).values.bind(root),
+        values: async function* () {
+          if ((window as any).failFolderRead)
+            throw new Error("Folder temporarily unavailable");
+          yield* (root as any).values();
+        },
         getDirectoryHandle: root.getDirectoryHandle.bind(root),
         getFileHandle: root.getFileHandle.bind(root),
         queryPermission: async () => "granted",
@@ -381,6 +393,9 @@ test("mounted folder saves source and new files, and refuses external changes", 
   await expect(page.locator("#build-state")).toHaveText("Accepted");
   await page.locator("#mount-folder").click();
   await expect(page.locator("#project-title")).toHaveText("Mounted project");
+  await expect(page.locator("#workspace-mode")).toHaveText("Folder connected");
+  await expect(page.locator("#reload-folder")).toBeVisible();
+  await expect(page.locator("#save-folder")).toBeDisabled();
   await page.locator(".cm-content").click();
   await page.keyboard.press("Control+End");
   await page.keyboard.type("\n// saved from muzpad");
@@ -439,6 +454,81 @@ test("mounted folder saves source and new files, and refuses external changes", 
     ),
   ).toBe("// edited outside");
   await expect(page.locator(".cm-content")).toContainText("local edit");
+  await page.evaluate(() => {
+    (window as any).failFolderRead = true;
+  });
+  await page.locator("#reload-folder").click();
+  await expect(page.locator("#diagnostic-list")).toContainText(
+    "Folder temporarily unavailable",
+  );
+  await expect(page.locator(".cm-content")).toContainText("local edit");
+  await expect(page.locator("#workspace-mode")).toHaveText("Folder connected");
+  await page.evaluate(async () => {
+    (window as any).failFolderRead = false;
+    const root = await navigator.storage.getDirectory();
+    await root.removeEntry("song.muz");
+    await root.removeEntry("parts", { recursive: true });
+    for (const [path, text] of Object.entries({
+      "main.muz":
+        'song({tracks:[track("reloaded", phrase("C4:q"), synth("init"))],tail:0.1})',
+      "muzpad.json": JSON.stringify({
+        title: "Reloaded from disk",
+        entry: "main.muz",
+      }),
+      "README.md": "# New disk document",
+    })) {
+      const writer = await (
+        await root.getFileHandle(path, { create: true })
+      ).createWritable();
+      await writer.write(text);
+      await writer.close();
+    }
+  });
+  await page.locator("#reload-folder").click();
+  await expect(page.locator("#project-title")).toHaveText("Reloaded from disk");
+  await expect(page.locator("#build-state")).toHaveText("Accepted");
+  await expect(
+    page.locator('[data-kind="project"][data-file="song.muz"]'),
+  ).toHaveCount(0);
+  await expect(
+    page.locator('[data-kind="project"][data-file="README.md"]'),
+  ).toBeVisible();
+  await expect(page.locator("#source-path")).toHaveText("main.muz");
+  await expect(page.locator("#workspace-mode")).toHaveText("Folder connected");
+  await expect(page.locator("#save-folder")).toBeDisabled();
+  expect(
+    await page.evaluate(
+      () =>
+        JSON.parse(localStorage.getItem("muzpad-previous-v1")!).files[
+          "song.muz"
+        ],
+    ),
+  ).toContain("local edit");
+  await page.locator(".cm-content").click();
+  await page.keyboard.press("Control+End");
+  await page.keyboard.type("\n// saved after reload");
+  await expect(page.locator("#folder-state")).toContainText("1 unsaved file");
+  await page.locator("#save-folder").click();
+  await expect(page.locator("#folder-state")).toContainText("Saved to folder");
+  expect(
+    await page.evaluate(async () =>
+      (
+        await (
+          await (
+            await navigator.storage.getDirectory()
+          ).getFileHandle("main.muz")
+        ).getFile()
+      ).text(),
+    ),
+  ).toContain("saved after reload");
+  await page.reload();
+  await expect(page.locator("#workspace-mode")).toHaveText("Browser copy");
+  await expect(page.locator("#folder-state")).toContainText(
+    "no longer connected",
+  );
+  await expect(page.locator("#reload-folder")).toBeHidden();
+  await expect(page.locator("#save-folder")).toBeHidden();
+  await expect(page.locator("#download")).toBeVisible();
 });
 
 test("Entrypoints excludes helper modules and refreshes after edits", async ({

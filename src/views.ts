@@ -1,3 +1,8 @@
+import {
+  arrangementRows,
+  hitDensity,
+  type ArrangementRow,
+} from "./arrangement-layout";
 import { enableGraphPanning } from "./pan";
 import { color } from "./theme";
 export const escapeHTML = (value: unknown) =>
@@ -22,6 +27,8 @@ export class Arrangement {
   surface = document.createElement("div");
   cursor = document.createElement("div");
   meterLayer = document.createElement("div");
+  groupLayer = document.createElement("div");
+  collapsed = new Set<string>();
   views: any;
   end = 1;
   zoom = 1;
@@ -30,8 +37,10 @@ export class Arrangement {
   selected = "";
   beat = 0;
   follow = true;
-  rows: { id: string; notes: any[]; ppq: number; min: number; max: number }[] =
-    [];
+  rows: ArrangementRow[] = [];
+  get densityMode() {
+    return this.scale < 24;
+  }
   onSeek: (beat: number) => void = () => {};
   onSelect: (track: string, note?: any) => void = () => {};
   onNavigation: () => void = () => {};
@@ -60,12 +69,16 @@ export class Arrangement {
     this.cursor.className = "playhead";
     this.meterLayer.className = "track-meters";
     this.surface.append(this.canvas);
-    parent.append(this.surface, this.cursor, this.meterLayer);
+    this.groupLayer.className = "kit-groups";
+    parent.append(this.surface, this.cursor, this.meterLayer, this.groupLayer);
     enableGraphPanning(parent, () => this.setFollow(false));
     let resizeFrame = 0;
     new ResizeObserver(() => {
       cancelAnimationFrame(resizeFrame);
-      resizeFrame = requestAnimationFrame(() => this.draw());
+      resizeFrame = requestAnimationFrame(() => {
+        this.draw();
+        this.onNavigation();
+      });
     }).observe(parent);
     parent.addEventListener("scroll", () => this.draw(), { passive: true });
     parent.addEventListener("pointerdown", (event) => {
@@ -119,26 +132,45 @@ export class Arrangement {
         if (x >= 130) this.onSeek(beat);
         return;
       }
-      const row = Math.floor((y - 58 + parent.scrollTop) / 56),
-        track = this.rows[row];
+      const track = this.rows.find(
+        (row) =>
+          y + parent.scrollTop >= row.top &&
+          y + parent.scrollTop < row.top + row.height,
+      );
       if (!track) return;
+      if (track.kind === "group") {
+        if (x >= 130) this.onSeek(beat);
+        else this.toggleGroup(track.id);
+        return;
+      }
       this.selected = track.id;
-      const top = 58 + row * 56 - parent.scrollTop;
-      const note =
-        x < 130
-          ? undefined
-          : track.notes.find((n) => {
-              const noteY =
-                top +
-                43 -
-                ((n.key - track.min) / Math.max(1, track.max - track.min)) * 31;
-              return (
-                Math.abs(y - noteY) <= 6 &&
-                beat >= n.start_tick / track.ppq &&
-                beat <=
-                  (n.start_tick + n.duration_ticks) / track.ppq + 3 / this.scale
-              );
-            });
+      const top = track.top - parent.scrollTop;
+      let note: any;
+      if (x >= 130 && track.kind === "kit") {
+        // Select the nearest onset, including markers that extend left of their exact beat.
+        const candidates = track.notes.filter(
+          (n) => Math.abs((n.start_tick / track.ppq - beat) * this.scale) <= 6,
+        );
+        if (Math.abs(y - (top + 14)) <= 11)
+          note = candidates.sort(
+            (a, b) =>
+              Math.abs(a.start_tick / track.ppq - beat) -
+              Math.abs(b.start_tick / track.ppq - beat),
+          )[0];
+      } else if (x >= 130) {
+        note = track.notes.find((n) => {
+          const noteY =
+            top +
+            43 -
+            ((n.key - track.min) / Math.max(1, track.max - track.min)) * 31;
+          return (
+            Math.abs(y - noteY) <= 6 &&
+            beat >= n.start_tick / track.ppq &&
+            beat <=
+              (n.start_tick + n.duration_ticks) / track.ppq + 3 / this.scale
+          );
+        });
+      }
       this.onSelect(track.id, note);
       this.draw();
     });
@@ -153,38 +185,52 @@ export class Arrangement {
     this.parent.scrollLeft = 0;
     this.parent.scrollTop = 0;
     this.meterLayer.replaceChildren();
+    this.groupLayer.replaceChildren();
+    this.collapsed.clear();
     this.draw();
     this.onNavigation();
   }
   set(views: any, end: number) {
     this.views = views;
     this.end = Math.max(1, end);
-    this.rows = views.performance.map((t: any) => {
-      const notes =
-        t.notes ??
-        t.source?.notes?.map((n: any) => ({
-          start_tick: n.start_ticks,
-          duration_ticks: n.duration_ticks,
-          key: n.key,
-          attack_velocity: n.velocity * 127,
-        })) ??
-        [];
-      return {
-        id: t.track,
-        ppq: t.ppq ?? 960,
-        notes,
-        min: notes.reduce((n: number, note: any) => Math.min(n, note.key), 48),
-        max: notes.reduce((n: number, note: any) => Math.max(n, note.key), 60),
-      };
-    });
-    this.meterLayer.innerHTML = this.rows
-      .map(
-        (row, i) =>
-          `<div class="track-meter" style="top:${58 + i * 56 + 36}px" title="${escapeHTML(row.id)} output peak"><span></span></div>`,
-      )
-      .join("");
+    this.layout();
     this.draw();
     this.onNavigation();
+  }
+  toggleGroup(id: string) {
+    if (this.collapsed.has(id)) this.collapsed.delete(id);
+    else this.collapsed.add(id);
+    this.layout();
+    this.draw();
+    this.onNavigation();
+  }
+  layout() {
+    const focused = (document.activeElement as HTMLElement)?.dataset.kit;
+    this.rows = arrangementRows(this.views, this.collapsed);
+    this.meterLayer.innerHTML = this.rows
+      .map(
+        (row) =>
+          `<div class="track-meter" style="top:${row.top + (row.kind === "kit" ? 19 : 36)}px" title="${escapeHTML(row.id)} output peak"><span></span></div>`,
+      )
+      .join("");
+    this.groupLayer.innerHTML = this.rows
+      .filter((row) => row.kind === "group")
+      .map(
+        (row) =>
+          `<button data-kit="${escapeHTML(row.id)}" style="top:${row.top}px" aria-label="${this.collapsed.has(row.id) ? "Expand" : "Collapse"} ${escapeHTML(row.label)} kit" aria-expanded="${!this.collapsed.has(row.id)}" title="${escapeHTML(row.label)} · ${row.members!.length} lanes · ${row.notes.length} hits"><span aria-hidden="true">${this.collapsed.has(row.id) ? "▸" : "▾"}</span> ${escapeHTML(row.label)} <small>Kit</small></button>`,
+      )
+      .join("");
+    this.groupLayer
+      .querySelectorAll<HTMLButtonElement>("[data-kit]")
+      .forEach((button) => {
+        button.onclick = () => this.toggleGroup(button.dataset.kit!);
+        button.onkeydown = (e) => {
+          if (["ArrowLeft", "ArrowRight", "Home"].includes(e.key))
+            e.stopPropagation();
+        };
+        if (button.dataset.kit === focused)
+          button.focus({ preventScroll: true });
+      });
   }
   setZoom(value: number, anchorX = 130 + (this.width - 142) / 2) {
     anchorX = Math.max(130, Math.min(this.width - 12, anchorX));
@@ -248,7 +294,7 @@ export class Arrangement {
     const height = this.parent.clientHeight;
     const ratio = Math.min(2, devicePixelRatio);
     this.surface.style.width = `${142 + Math.max(1, width - 142) * this.zoom}px`;
-    this.surface.style.height = `${Math.max(height, 58 + this.rows.length * 56)}px`;
+    this.surface.style.height = `${Math.max(height, (this.rows.at(-1)?.top ?? 58) + (this.rows.at(-1)?.height ?? 0))}px`;
     // Only allocate the visible bitmap, even when the timeline spans hundreds of thousands of pixels.
     if (this.canvas.width !== Math.round(width * ratio))
       this.canvas.width = Math.round(width * ratio);
@@ -278,11 +324,18 @@ export class Arrangement {
     c.rect(0, 58, width, height - 58);
     c.clip();
     this.rows.forEach((track, i) => {
-      const top = 58 + i * 56 - vertical;
-      if (top + 56 < 58 || top > height) return;
-      if (track.id === this.selected) {
+      const top = track.top - vertical;
+      if (top + track.height < 58 || top > height) return;
+      if (track.kind === "group") {
+        c.fillStyle = color("#151515");
+        c.fillRect(0, top, width, track.height);
+      }
+      if (
+        track.id === this.selected ||
+        track.members?.includes(this.selected)
+      ) {
         c.fillStyle = color("#181818");
-        c.fillRect(0, top, width, 56);
+        c.fillRect(0, top, width, track.height);
       }
       c.strokeStyle = color("#292929");
       c.beginPath();
@@ -293,27 +346,75 @@ export class Arrangement {
       c.beginPath();
       c.rect(130, 58, width - 130, height - 58);
       c.clip();
-      for (const note of track.notes) {
-        const a = note.start_tick / track.ppq,
-          b = (note.start_tick + note.duration_ticks) / track.ppq;
-        if (b < start || a > end) continue;
-        const y =
-          top +
-          43 -
-          ((note.key - track.min) / Math.max(1, track.max - track.min)) * 31;
-        c.fillStyle = color("#fff");
-        c.globalAlpha = 0.25 + (note.attack_velocity / 127) * 0.7;
-        c.fillRect(x(a), y, Math.max(1.5, (b - a) * this.scale), 2.5);
+      if (track.kind === "group" && !this.collapsed.has(track.id)) {
+        c.fillStyle = color("#888");
+        c.fillText(
+          `${track.members!.length} lanes · ${track.notes.length} hits`,
+          140,
+          top + 20,
+        );
+      } else if (
+        track.kind !== "pitched" &&
+        (this.densityMode || track.kind === "group")
+      ) {
+        const center = top + track.height / 2;
+        for (const bin of hitDensity(track, this.scale, start, end)) {
+          const h = 3 + 17 * (1 - Math.exp(-bin.count / 3));
+          c.globalAlpha = 0.25 + (0.7 * bin.velocity) / bin.count;
+          c.fillStyle = color("#fff");
+          c.fillRect(x(bin.beat), center - h / 2, 3, h);
+        }
+      } else {
+        for (const note of track.notes) {
+          const a = note.start_tick / track.ppq,
+            b = (note.start_tick + note.duration_ticks) / track.ppq;
+          if (
+            (track.kind === "kit" ? a + 6 / this.scale : b) < start ||
+            a > end + 6 / this.scale
+          )
+            continue;
+          const velocity = Math.max(0, Math.min(1, note.attack_velocity / 127));
+          c.fillStyle = color("#fff");
+          c.globalAlpha = 0.25 + velocity * 0.7;
+          if (track.kind === "kit") {
+            const y = top + 14,
+              radius = 2 + velocity * 3;
+            c.beginPath();
+            c.moveTo(x(a), y - radius);
+            c.lineTo(x(a) + radius, y);
+            c.lineTo(x(a), y + radius);
+            c.lineTo(x(a) - radius, y);
+            c.closePath();
+            c.fill();
+          } else {
+            const y =
+              top +
+              43 -
+              ((note.key - track.min) / Math.max(1, track.max - track.min)) *
+                31;
+            c.fillRect(x(a), y, Math.max(1.5, (b - a) * this.scale), 2.5);
+          }
+        }
       }
       c.restore();
       c.fillStyle = color("#d0d0d0");
       c.save();
       c.beginPath();
-      c.rect(8, top, 118, 56);
+      c.rect(8, top, 118, track.height);
       c.clip();
-      c.fillText(track.id, 12, top + 24);
-      c.fillStyle = color("#747474");
-      c.fillText(`${track.notes.length} notes`, 12, top + 40);
+      if (track.kind === "kit") {
+        c.strokeStyle = color("#555");
+        c.beginPath();
+        c.moveTo(14.5, top);
+        c.lineTo(14.5, top + 14);
+        c.lineTo(21, top + 14);
+        c.stroke();
+        c.fillText(track.label, 27, top + 17);
+      } else if (track.kind === "pitched") {
+        c.fillText(track.id, 12, top + 24);
+        c.fillStyle = color("#747474");
+        c.fillText(`${track.notes.length} notes`, 12, top + 40);
+      }
       c.restore();
     });
     c.restore();
@@ -395,10 +496,26 @@ export class Arrangement {
     c.fillText("PERFORMED", 12, 19);
     c.fillText("Bar · beat", 12, 47);
     this.meterLayer.style.left = `${scroll + 96}px`;
+    this.groupLayer.style.left = `${scroll}px`;
     Array.from(this.meterLayer.children).forEach((el, i) => {
-      const y = 58 + i * 56 + 36 - vertical;
-      (el as HTMLElement).hidden = y < 58 || y > height;
+      const row = this.rows[i];
+      const y = row.top + (row.kind === "kit" ? 19 : 36) - vertical;
+      (el as HTMLElement).hidden = row.kind === "group" || y < 58 || y > height;
     });
+    this.groupLayer
+      .querySelectorAll<HTMLButtonElement>("[data-kit]")
+      .forEach((button) => {
+        const row = this.rows.find(
+          (row) => row.kind === "group" && row.id === button.dataset.kit,
+        )!;
+        const y = row.top - vertical;
+        button.hidden = y < 58 || y > height;
+        button.classList.toggle(
+          "active",
+          !!row.members?.includes(this.selected),
+        );
+      });
+    this.parent.dataset.kitView = this.densityMode ? "density" : "hits";
     this.drawCursor();
   }
 }

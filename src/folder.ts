@@ -104,7 +104,7 @@ export class MountedFolder {
       }
       if (disk !== this.baseline[path])
         throw new Error(
-          `${path} changed outside muzpad. Download your edits, then reopen the folder to load the disk version. No files were written.`,
+          `${path} changed outside muzpad. Use Reload to read the disk version and keep this working copy in Previous workspace. No files were written.`,
         );
     }
     for (const [path, text] of changes) {

@@ -31,6 +31,7 @@ type Project = {
   entries?: string[];
   description?: string;
   gist?: string;
+  folderName?: string;
 };
 type Catalog = {
   libraries: Record<string, string>;
@@ -47,6 +48,7 @@ let catalog: Catalog,
   file = "",
   revision = 0,
   accepted = -1,
+  acceptedEntry = "",
   runToken = 0;
 let views: any,
   status: any,
@@ -60,6 +62,8 @@ let entryScanToken = 0;
 let entryScanTimer: ReturnType<typeof setTimeout>;
 let mount: MountedFolder | undefined;
 let saving = false;
+let reloading = false;
+let mountedSettings: string | undefined;
 let inspectorOpen = localStorage.getItem("muzpad-inspector") !== "closed";
 let draftTimer: ReturnType<typeof setTimeout>;
 let tabs: string[] = [],
@@ -68,12 +72,12 @@ const starter =
   'use "std/synthesis" as synths;\n\nlet motif = phrase("C4:q E4:q G4:q B4:q");\n\nsong({\n    title: "Untitled project",\n    tempo: 120,\n    tracks: [track("lead", motif.repeat(4), synths.pluck())],\n    tail: 2\n})\n';
 
 $("app").innerHTML = `
-  <header class="topbar"><div class="brand"><span class="brand-mark" aria-hidden="true">∿</span>muzpad<span class="alpha">01</span></div><div class="project-identity"><div class="project-title" id="project-title">A place for music in code</div><span id="folder-state">Browser working copy</span></div><div class="top-actions"><button id="theme-toggle" aria-label="Switch color theme">Dark view ◐</button><button id="new-project">New project</button><button id="mount-folder" title="Open a local folder and save changes back to it" hidden>Mount folder</button><button id="open-folder" title="Import a browser copy; download a ZIP to keep your changes">Import folder</button><button id="save-folder" hidden>Save to folder</button><button id="import-gist">Import from gist</button><button id="open-zip">Open ZIP</button><button id="download">Download project ↓</button><a id="view-gist" class="button-link" target="_blank" rel="noopener noreferrer" hidden>View gist ↗</a></div></header>
+  <header class="topbar"><div class="brand"><span class="brand-mark" aria-hidden="true">∿</span>muzpad<span class="alpha">01</span></div><div class="project-identity"><div class="project-title" id="project-title">A place for music in code</div><div class="workspace-status"><strong id="workspace-mode">Browser copy</strong><span id="folder-state">No folder connected</span></div></div><div class="project-actions" aria-label="Current workspace actions"><button id="reload-folder" title="Read files from the connected folder and rebuild. Keeps this working copy in Previous workspace." hidden>Reload</button><button id="save-folder" hidden>Save to folder</button><button id="download">Export ZIP ↓</button><a id="view-gist" class="button-link" target="_blank" rel="noopener noreferrer" hidden>View gist ↗</a></div><div class="top-actions"><button id="theme-toggle" aria-label="Switch color theme">Dark view ◐</button><button id="new-project">New project</button><button id="mount-folder" title="Open a local folder and save changes back to it" hidden>Mount folder</button><button id="open-folder" title="Import a browser copy; download a ZIP to keep your changes">Import folder</button><button id="import-gist">Import from gist</button><button id="open-zip">Open ZIP</button></div></header>
   <div class="transport"><div class="transport-buttons"><button id="restart" class="icon-button" aria-label="Restart" title="Restart">↤</button><button id="play" class="play-button" disabled>▶ Play</button><button id="stop" class="icon-button" aria-label="Stop" title="Stop" disabled>■</button></div><div class="clock"><span id="clock">0:00</span><span id="length">/ —</span></div><div class="position"><span id="bar">Bar 1 · Beat 1</span><span id="tempo">— BPM</span></div><select id="section" aria-label="Seek to section"><option value="">Sections</option></select><button id="loop" aria-pressed="false">↻ Loop section</button><details class="range-menu"><summary>Range</summary><div><label>Start beat <input id="loop-start" type="number" min="0" value="0"></label><label>End beat <input id="loop-end" type="number" min="0" value="16"></label><button id="apply-loop">Loop range</button></div></details><div class="master-meter" title="Master output peak"><span id="meter-fill"></span></div><span id="master-level">−∞ dB</span><div class="transport-spacer"></div><span id="revision">No accepted revision</span><button id="cancel" hidden>Cancel</button><button id="run" class="primary">Rebuild <span>⌘ / Ctrl ↵</span></button></div>
-  <main class="workspace"><aside class="explorer"><div class="pane-heading">Workspace <button id="add-file" title="Add a source file" aria-label="Add a source file">＋</button></div><label class="file-search"><input id="file-search" placeholder="Find a file…" aria-label="Find a file"></label><div id="file-tree"></div><div class="explorer-foot"><span class="status-dot"></span> Edits stay on this device</div></aside>
-  <section class="source-pane"><div class="tabs" id="file-tabs"></div><div class="source-tools"><span id="source-path"></span><label class="entry-choice">Entrypoints <select id="entry-select" aria-label="Entrypoints" title="Choose the file to rebuild"></select></label><button id="format">Format</button><button id="set-entry">Use as entry</button></div><div id="editor"></div><div id="requirements" hidden></div><div id="document" hidden></div><div class="source-foot"><span id="source-mode">muz source</span><span id="entry-label"></span></div></section>
+  <main class="workspace"><aside class="explorer"><div class="pane-heading">Workspace <button id="add-file" title="Add a source file" aria-label="Add a source file">＋</button></div><label class="file-search"><input id="file-search" placeholder="Find a file…" aria-label="Find a file"></label><div id="file-tree"></div><div class="explorer-foot" id="workspace-help">Browser copy. Download a ZIP to keep your work.</div></aside>
+  <section class="source-pane"><div class="tabs" id="file-tabs"></div><div class="source-tools"><span id="source-path"></span><label class="entry-choice">Entrypoints <select id="entry-select" aria-label="Entrypoints" title="Choose the file to rebuild"></select></label><button id="format">Format</button><button id="set-entry">Use as entry</button></div><div id="entry-notice" role="status" hidden></div><div id="editor"></div><div id="requirements" hidden></div><div id="document" hidden></div><div class="source-foot"><span id="source-mode">muz source</span><span id="entry-label"></span></div></section>
   <div class="splitter" role="separator" tabindex="0" aria-label="Resize editor" aria-orientation="vertical"></div>
-  <section class="visual-pane"><div class="view-tabs" role="tablist" aria-label="Inspection views"><button data-view="arrangement" role="tab" aria-selected="true">Arrangement</button><button data-view="routing" role="tab" aria-selected="false">Routing</button><button data-view="patch" role="tab" aria-selected="false">Voice patch</button><button data-view="automation" role="tab" aria-selected="false">Automation</button></div><div class="visual-tools"><span id="view-caption">The music your code makes</span></div><div class="arrangement-tools" id="arrangement-controls" role="toolbar" aria-label="Arrangement navigation"><button id="zoom-out" aria-label="Zoom out" title="Zoom out (−)">−</button><input id="zoom" type="range" min="0" max="9" step=".05" value="0" aria-label="Arrangement zoom"><button id="zoom-in" aria-label="Zoom in" title="Zoom in (+)">＋</button><output id="zoom-value">1×</output><button id="zoom-fit" title="Fit the entire arrangement (Home)">Fit</button><button id="center-playhead" title="Center the view on the playhead">Center playhead</button><button id="follow" aria-pressed="true" title="Keep the playhead visible during playback; manual panning turns this off">Follow</button></div><div class="view-content"><div id="arrangement"></div><div id="graph-view" hidden></div></div><div class="selection-heading"><button id="toggle-inspector" aria-expanded="true" aria-controls="inspector" title="Show or hide inspector">Inspector ▾</button><span id="selection-label">Inspector</span><button id="jump-source" disabled>Open related source ↗</button></div><div id="inspector"><p class="empty">Select a track or note to inspect its performance and sound.</p></div><div class="analysis-heading"><label>Analyze <select id="analysis-source" aria-label="Analysis output"><option value="">Master</option></select></label><span id="analysis-detail">Master output</span></div><div class="analysis-strip"><div><span>Waveform</span><canvas id="scope" width="320" height="70" aria-label="Selected output waveform"></canvas></div><div><span>Spectrum</span><canvas id="spectrum" width="320" height="70" aria-label="Selected output spectrum"></canvas></div></div></section></main>
+  <section class="visual-pane"><div class="view-tabs" role="tablist" aria-label="Inspection views"><button data-view="arrangement" role="tab" aria-selected="true">Arrangement</button><button data-view="routing" role="tab" aria-selected="false">Routing</button><button data-view="patch" role="tab" aria-selected="false">Voice patch</button><button data-view="automation" role="tab" aria-selected="false">Automation</button></div><div class="visual-tools"><span id="view-caption">The music your code makes</span><span id="kit-legend" hidden></span></div><div class="arrangement-tools" id="arrangement-controls" role="toolbar" aria-label="Arrangement navigation"><button id="zoom-out" aria-label="Zoom out" title="Zoom out (−)">−</button><input id="zoom" type="range" min="0" max="9" step=".05" value="0" aria-label="Arrangement zoom"><button id="zoom-in" aria-label="Zoom in" title="Zoom in (+)">＋</button><output id="zoom-value">1×</output><button id="zoom-fit" title="Fit the entire arrangement (Home)">Fit</button><button id="center-playhead" title="Center the view on the playhead">Center playhead</button><button id="follow" aria-pressed="true" title="Keep the playhead visible during playback; manual panning turns this off">Follow</button></div><div class="view-content"><div id="arrangement"></div><div id="graph-view" hidden></div></div><div class="selection-heading"><button id="toggle-inspector" aria-expanded="true" aria-controls="inspector" title="Show or hide inspector">Inspector ▾</button><span id="selection-label">Inspector</span><button id="jump-source" disabled>Open related source ↗</button></div><div id="inspector"><p class="empty">Select a track or note to inspect its performance and sound.</p></div><div class="analysis-heading"><label>Analyze <select id="analysis-source" aria-label="Analysis output"><option value="">Master</option></select></label><span id="analysis-detail">Master output</span></div><div class="analysis-strip"><div><span>Waveform</span><canvas id="scope" width="320" height="70" aria-label="Selected output waveform"></canvas></div><div><span>Spectrum</span><canvas id="spectrum" width="320" height="70" aria-label="Selected output spectrum"></canvas></div></div></section></main>
   <footer class="diagnostics"><div class="diagnostics-heading"><span id="build-state">Starting</span><span id="build-detail">Loading muz-core</span><span id="audio-health"></span></div><div id="diagnostic-list" role="status" aria-live="polite"></div></footer>
   <input id="folder-input" type="file" webkitdirectory multiple hidden><input id="zip-input" type="file" accept=".zip" hidden>
   <dialog id="gist-dialog"><form id="gist-form"><h2>Import from gist</h2><label>Gist URL or ID<input id="gist-input" required autocomplete="off" spellcheck="false" placeholder="https://gist.github.com/…"></label><p>Open a local working copy. Share this page’s URL to share the gist; local edits are not included.</p><p id="gist-error" role="alert"></p><div><button type="button" id="gist-cancel">Cancel</button><button id="gist-submit" class="primary">Import</button></div></form></dialog>
@@ -110,13 +114,38 @@ function projectDiskFiles() {
 }
 function updateFolderState() {
   const pending =
-    mount && project ? mount.changes(projectDiskFiles()).length : 0;
+    mount && project
+      ? mount
+          .changes(projectDiskFiles())
+          .filter(
+            ([path, text]) =>
+              path !== "muzpad.json" || text !== mountedSettings,
+          ).length
+      : 0;
   $("save-folder").hidden = !mount;
-  $("save-folder").toggleAttribute("disabled", saving || !pending);
+  $("reload-folder").hidden = !mount;
+  $("download").hidden = !!project?.gist;
+  $("save-folder").toggleAttribute("disabled", saving || reloading || !pending);
+  $("reload-folder").toggleAttribute("disabled", saving || reloading);
   $("save-folder").textContent = saving ? "Saving…" : "Save to folder";
+  $("reload-folder").textContent = reloading ? "Reloading…" : "Reload";
+  $("workspace-mode").textContent = mount ? "Folder connected" : "Browser copy";
+  $("workspace-mode").dataset.mode = mount ? "connected" : "browser";
+  $("workspace-mode").classList.toggle("unsaved", !!pending);
   $("folder-state").textContent = mount
-    ? `${mount.root.name} · ${pending ? "Unsaved folder changes" : "Saved to folder"}`
-    : "Browser working copy";
+    ? `${mount.root.name} · ${pending ? `${pending} unsaved file${pending === 1 ? "" : "s"}` : "Saved to folder"}`
+    : project?.gist
+      ? "From GitHub gist · no folder connected"
+      : project?.folderName
+        ? `${project.folderName} · no longer connected`
+        : "No folder connected";
+  $("workspace-help").textContent = mount
+    ? "Save writes your changes to this folder. Reload reads files from disk and keeps your current edits in Previous workspace."
+    : project?.gist
+      ? "Edits stay in this browser. View gist opens the original; sharing this page does not include your edits."
+      : project?.folderName
+        ? "This recovered copy is disconnected. Download your edits to keep them; Mount folder opens the files on disk."
+        : "Edits stay in this browser. Download a ZIP to keep a copy, or Mount folder to work directly with files on disk.";
 }
 function updateEntryChoices() {
   const entries = [
@@ -177,13 +206,14 @@ function scheduleEntryScan(delay = 600) {
   }, delay);
 }
 async function saveFolder() {
-  if (!mount || saving) return;
+  if (!mount || saving || reloading) return;
   const target = mount;
   const files = projectDiskFiles();
   saving = true;
   updateFolderState();
   try {
     await target.save(files);
+    if (mount === target) mountedSettings = target.baseline["muzpad.json"];
   } catch (e) {
     error(e);
   } finally {
@@ -199,12 +229,39 @@ $("mount-folder").onclick = async () => {
     const mounted = new MountedFolder(root, files);
     importProject(files, root.name);
     mount = mounted;
+    project.folderName = root.name;
+    mountedSettings = projectDiskFiles()["muzpad.json"];
+    persistDraft();
     updateFolderState();
   } catch (e) {
     if ((e as Error).name !== "AbortError") error(e);
   }
 };
 $("save-folder").onclick = () => void saveFolder();
+$("reload-folder").onclick = async () => {
+  if (!mount || saving || reloading) return;
+  const target = mount,
+    current = project;
+  reloading = true;
+  updateFolderState();
+  try {
+    const files = await readFolder(target.root);
+    if (mount !== target || project !== current) return;
+    const connected = new MountedFolder(target.root, files);
+    const build = importProject(files, target.root.name, true);
+    mount = connected;
+    project.folderName = target.root.name;
+    mountedSettings = projectDiskFiles()["muzpad.json"];
+    persistDraft();
+    updateFolderState();
+    await build;
+  } catch (e) {
+    if (project === current || mount?.root === target.root) error(e);
+  } finally {
+    reloading = false;
+    updateFolderState();
+  }
+};
 window.addEventListener("keydown", (event) => {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
     event.preventDefault();
@@ -267,7 +324,14 @@ function updateRevision() {
         ? `Revision ${accepted + 1} accepted`
         : `Edited · revision ${accepted + 1} accepted`;
   $("revision").classList.toggle("dirty", revision !== accepted);
-  $("entry-label").textContent = `Entry: ${project.entry}`;
+  const entryPending = accepted >= 0 && project.entry !== acceptedEntry;
+  $("entry-notice").hidden = !entryPending;
+  $("entry-notice").textContent = entryPending
+    ? `Rebuild to use ${project.entry} · ${acceptedEntry} is still active`
+    : "";
+  $("entry-label").textContent = entryPending
+    ? `Active entry: ${acceptedEntry}`
+    : `Entry: ${project.entry}`;
 }
 function persistDraft() {
   if (!project) return;
@@ -282,9 +346,9 @@ function saveDraft() {
   draftTimer = setTimeout(persistDraft, 400);
 }
 window.addEventListener("pagehide", persistDraft);
-function openProject(next: Project) {
+function openProject(next: Project, rebuild = true) {
   mount = undefined;
-  updateFolderState();
+  mountedSettings = undefined;
   player.stop();
   player.loop = null;
   $("loop").setAttribute("aria-pressed", "false");
@@ -302,8 +366,10 @@ function openProject(next: Project) {
     $<HTMLAnchorElement>("view-gist").href =
       `https://gist.github.com/${parseGist(project.gist)}`;
   setGistURL(project.gist);
+  updateFolderState();
   revision = 0;
   accepted = -1;
+  acceptedEntry = "";
   tabs = [];
   editor.states.clear();
   editor.path = "";
@@ -334,6 +400,7 @@ function openProject(next: Project) {
   showView();
   persistDraft();
   message("Ready to rebuild", "Edit the source, then Rebuild to hear it");
+  return rebuild ? run() : Promise.resolve();
 }
 function tree() {
   const query = $<HTMLInputElement>("file-search").value.toLowerCase();
@@ -442,12 +509,17 @@ function tree() {
       };
     });
 }
-function preserveProject() {
+function preserveProject(required = false) {
   // Keep the previous workspace recoverable when switching projects without a modal.
   if (project) {
     try {
       localStorage.setItem("muzpad-previous-v1", JSON.stringify(project));
-    } catch {}
+    } catch {
+      if (required)
+        throw new Error(
+          "Could not preserve your current edits in browser storage. Download them before reloading the folder.",
+        );
+    }
   }
 }
 function openFile(path: string, isLibrary = false) {
@@ -539,7 +611,8 @@ async function run() {
   $("run").setAttribute("disabled", "");
   $("cancel").hidden = false;
   const token = ++runToken,
-    sourceRevision = revision;
+    sourceRevision = revision,
+    sourceEntry = project.entry;
   $("diagnostic-list").replaceChildren();
   message("Compiling", project.entry);
   try {
@@ -547,7 +620,7 @@ async function run() {
     const result = await compiler.call({
       command: "compile",
       files,
-      entry: project.entry,
+      entry: sourceEntry,
     });
     if (token !== runToken) return;
     message("Preparing audio", "Building native instruments and effects");
@@ -559,6 +632,7 @@ async function run() {
     views = result.views;
     status = nextStatus;
     accepted = sourceRevision;
+    acceptedEntry = sourceEntry;
     $("loop").setAttribute("aria-pressed", String(!!player.loop));
     $("play").removeAttribute("disabled");
     $("stop").removeAttribute("disabled");
@@ -619,10 +693,24 @@ function selectTrack(id: string, note?: any) {
   arrangement.selected = id;
   const track = views.graph.tracks.find((t: any) => t.id === id);
   const performance = views.performance.find((t: any) => t.track === id);
-  $("selection-label").textContent = note ? `${id} · ${pitch(note.key)}` : id;
+  const group = views.graph.extras.track_groups?.find(
+    (g: any) => g.kind === "kit" && g.members.some((m: any) => m.track === id),
+  );
+  const member = group?.members.find((m: any) => m.track === id);
+  $("selection-label").textContent = note
+    ? member
+      ? `${group.id} · ${member.label} hit`
+      : `${id} · ${pitch(note.key)}`
+    : id;
   $("jump-source").toggleAttribute("disabled", !views.locations[`track.${id}`]);
   const rows: [string, unknown][] = note
     ? [
+        ...(member
+          ? ([
+              ["Kit", group.id],
+              ["Lane", member.label],
+            ] as [string, unknown][])
+          : []),
         ["Pitch", pitch(note.key)],
         ["Start beat", (note.start_tick / (performance.ppq ?? 960)).toFixed(3)],
         [
@@ -683,6 +771,7 @@ function showView() {
     automation: "Parameter curves · read only",
   };
   $("view-caption").textContent = captions[view];
+  arrangement.onNavigation();
   if (!views) {
     $("graph-view").innerHTML =
       '<p class="empty">Rebuild a project to inspect its sound.</p>';
@@ -754,7 +843,11 @@ function validateFiles(files: Record<string, string>) {
   if (!Object.keys(files).some((p) => p.endsWith(".muz")))
     throw new Error("This folder contains no muz source files.");
 }
-function importProject(files: Record<string, string>, title: string) {
+function importProject(
+  files: Record<string, string>,
+  title: string,
+  preserveRequired = false,
+) {
   validateFiles(files);
   let settings: any = {};
   try {
@@ -766,8 +859,8 @@ function importProject(files: Record<string, string>, title: string) {
     : files["song.muz"]
       ? "song.muz"
       : Object.keys(files).find((p) => p.endsWith(".muz"))!;
-  preserveProject();
-  openProject({
+  preserveProject(preserveRequired);
+  return openProject({
     id: title.replace(/[^a-z0-9-]/gi, "-"),
     title: typeof settings.title === "string" ? settings.title : title,
     entry,
@@ -871,8 +964,7 @@ async function importGist(input: string) {
     const next = await loadGist(input, { signal: request.signal });
     if (request.signal.aborted) return;
     preserveProject();
-    openProject(next);
-    await run();
+    await openProject(next);
   } catch (e) {
     if (!request.signal.aborted) throw e;
   } finally {
@@ -974,6 +1066,12 @@ arrangement.onNavigation = () => {
     arrangement.zoom >= arrangement.maxZoom,
   );
   $("follow").setAttribute("aria-pressed", String(arrangement.follow));
+  $("kit-legend").hidden =
+    view !== "arrangement" ||
+    !arrangement.rows.some((row) => row.kind === "group");
+  $("kit-legend").textContent = arrangement.densityMode
+    ? "Kit lanes: hit density"
+    : "◆ Hit · size and shade = velocity";
 };
 $("zoom").oninput = () =>
   arrangement.setZoom(2 ** +$<HTMLInputElement>("zoom").value);
@@ -1188,22 +1286,22 @@ try {
     }
   } catch {}
   const requested = new URL(location.href).searchParams.get("gist");
-  openProject(
+  const needsGist = requested && requested !== restored?.gist;
+  const initialBuild = openProject(
     restored ?? {
       id: "untitled-project",
       title: "Untitled project",
       entry: "song.muz",
       files: { "song.muz": starter },
     },
+    !needsGist,
   );
-  if (requested && requested !== restored?.gist) {
+  if (needsGist) {
     // Keep the requested URL on failure so a reload can retry the same gist.
     setGistURL(requested);
     await importGist(requested);
   } else {
-    if (restored)
-      message("Draft restored", "Your last working copy is ready to rebuild");
-    await run();
+    await initialBuild;
   }
 } catch (e) {
   error(e);

@@ -1291,3 +1291,114 @@ select:focus-visible {
 #gist-error {
   color: var(--c-fff);
 }
+
+.kit-groups {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 130px;
+}
+.kit-groups button {
+  position: absolute;
+  left: 0;
+  width: 130px;
+  height: 32px;
+  padding: 0 10px;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border: 0;
+  border-top: 1px solid var(--c-292929);
+  border-right: 1px solid var(--c-292929);
+  background: var(--c-151515);
+  font-size: 11px;
+}
+.kit-groups button.active {
+  background: var(--c-181818);
+}
+.kit-groups small {
+  color: var(--c-888);
+  font-size: 9px;
+  margin-left: 5px;
+}
+#kit-legend {
+  margin-left: auto;
+  color: var(--c-888);
+  font-size: 10px;
+}
+
+.topbar {
+  min-height: 58px;
+  height: auto;
+  padding-top: 5px;
+  padding-bottom: 5px;
+}
+.project-identity {
+  min-width: 220px;
+}
+.workspace-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 7px;
+  margin-top: 4px;
+}
+#workspace-mode {
+  border: 1px solid var(--c-555);
+  padding: 2px 5px;
+  font-size: 10px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+#workspace-mode[data-mode="connected"] {
+  background: var(--c-eee);
+  color: var(--c-080808);
+  border-color: var(--c-eee);
+}
+#workspace-mode.unsaved::before {
+  content: "● ";
+  font-size: 8px;
+}
+#folder-state {
+  margin: 0;
+  color: var(--c-999);
+}
+.project-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding-right: 12px;
+  border-right: 1px solid var(--c-383838);
+}
+.project-actions button {
+  font-size: 11px;
+  padding: 6px 8px;
+}
+#save-folder {
+  background: var(--c-eee);
+  color: var(--c-080808);
+}
+.top-actions {
+  max-width: 520px;
+}
+@media (max-width: 1250px) {
+  .topbar {
+    flex-wrap: wrap;
+    gap: 8px 16px;
+  }
+  .top-actions {
+    margin-left: auto;
+  }
+}
+.visual-tools {
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+#entry-notice {
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--c-555);
+  background: var(--c-181818);
+  color: var(--c-eee);
+  font-size: 11px;
+}

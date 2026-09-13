@@ -20,7 +20,8 @@ npm run dev
 
 Open the URL printed by Vite. Choose Still Our Own from the Gists sidebar to
 load its source from GitHub, or start with the new project. Imported gists compile
-locally on opening; press Play to enable browser audio. Rebuild, or Cmd/Ctrl+Enter in the editor, accepts a new source
+locally on opening; press Play to enable browser audio. Every project open or reload
+automatically builds, including local folders, ZIPs, new projects, and recovered drafts. Rebuild, or Cmd/Ctrl+Enter in the editor, accepts a new source
 revision. Invalid edits retain the previous accepted session. A successful run
 rebuilds audio at the current position; held voices and effect tails are not
 preserved across revisions.
@@ -33,18 +34,25 @@ preserved across revisions.
 - Open a local folder or project ZIP. Relative imports stay relative to their
   declaring module. Only muz source, Markdown documentation, and muzpad metadata
   are imported. Up to 500 files and 4 MB of text are supported.
+- The header distinguishes **Folder connected** from **Browser copy**, shows the
+  folder's unsaved-file count, and groups current-workspace actions separately
+  from opening other projects. Gist copies explicitly say that edits stay local.
 - Mount a folder in browsers with the writable directory picker. **Save to
   folder** (Cmd/Ctrl+S) writes changed files and entry metadata back to that folder,
   including new nested source files. Saving checks for outside edits before
   writing; conflicts leave browser edits available for ZIP download. Mounts last
-  for this tab session. After reloading, the recovered draft is a browser copy;
-  mount the folder again to reconnect to disk. Folder import and ZIP download
-  remain available in browsers without mounting support.
+  for this tab session. After refreshing the page, the recovered draft is a browser copy.
+  **Reload** rereads the mounted folder, including added/deleted files and entry
+  metadata, and automatically rebuilds. It preserves the latest browser copy in
+  Previous workspace before replacing it. Read failures keep the current workspace.
+  Mounting again opens the current disk files; a recovered draft is clearly labeled
+  disconnected. Folder import and ZIP download remain available in browsers without mounting support.
 - Edit multiple source files, format them with muz's formatter, add files, and
   choose the compilation entry. Bundled libraries are read only.
 - The Entrypoints chooser lists only files the compiler validates as playable entry
   points, with declared entries first. Validation refreshes after source edits.
-  Choosing one changes what the next Rebuild compiles.
+  Changing entrypoint does not rebuild automatically. A notice names the selected
+  entrypoint and the still-active one until Rebuild accepts the change.
 - Play/pause, stop, restart, seek on the ruler or by section, and loop a section
   or an explicit beat range. Range values use zero-based musical beats.
 - Inspect arrangement notes, note performance data, routing, native voice graphs,
@@ -71,6 +79,14 @@ performance, not measured audio. Analysis is mono downmixed by Web Audio; track
 analysis and meters measure output before routing to buses. Switching analysis
 briefly clears the display while queued audio drains, without restarting playback
 or changing the audible mix.
+
+Kit tracks appear as collapsible groups with compact named voice lanes. At close
+zoom, diamonds mark performed hit onsets; size and shade show attack velocity.
+At wide zoom, bars aggregate hit count and average velocity in four-pixel bins.
+Collapsed kits show aggregate hit density. Pitched tracks retain note contours.
+Lane meters, hit inspection, analysis selection, and source navigation use the
+physical voice tracks. Group membership comes from the engine's authored metadata,
+so custom names work and unrelated dotted track IDs stay independent.
 
 Drag to pan the arrangement or either graph. In the arrangement, Ctrl/Cmd + wheel
 zooms around the pointer, and Shift + wheel pans horizontally. The slider and
