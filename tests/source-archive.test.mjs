@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import {
   coreState,
   sha256,
@@ -44,7 +44,7 @@ test("archive captures the recorded commit and refuses dirty or mismatched sourc
     assert.equal(
       execFileSync(
         "tar",
-        ["-xOzf", archive, `muz-core-${build.commit}/source.muz`],
+        ["-xOzf", archive, `${basename(archive, ".tgz")}/source.muz`],
         { encoding: "utf8" },
       ),
       "source at build time",

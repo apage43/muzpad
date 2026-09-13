@@ -1,7 +1,7 @@
 // Publishing happens only when this command is explicitly invoked.
 import { execFileSync } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { basename, resolve } from "node:path";
 import {
   buildConfig,
   coreState,
@@ -40,8 +40,9 @@ if (archive) {
     resolve(root, "dist/muz.wasm"),
     resolve(root, ".artifacts"),
   );
-  const key = `${destination.prefix.replace(/\/$/, "")}/${build.commit}.tgz`;
-  const url = `${destination.baseUrl.replace(/\/$/, "")}/${build.commit}.tgz`;
+  const filename = basename(path);
+  const key = `${destination.prefix.replace(/\/$/, "")}/${filename}`;
+  const url = `${destination.baseUrl.replace(/\/$/, "")}/${filename}`;
   if (dryRun)
     console.log(
       `Dry run: created ${path}; would upload to ${destination.bucket}/${key} and link ${url}`,
@@ -61,7 +62,7 @@ if (archive) {
         "--content-type",
         "application/gzip",
         "--content-disposition",
-        `attachment; filename="${build.commit}.tgz"`,
+        `attachment; filename="${filename}"`,
         "--cache-control",
         "public, max-age=31536000, immutable",
       ],

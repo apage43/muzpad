@@ -53,7 +53,13 @@ export async function createSourceArchive(core, build, wasm, directory) {
       "WASM does not match the recorded engine build. Rebuild before archiving.",
     );
   await mkdir(directory, { recursive: true });
-  const path = resolve(directory, `${build.commit}.tgz`),
+  const shortHash = execFileSync(
+    "git",
+    ["-C", core, "rev-parse", "--short", build.commit],
+    { encoding: "utf8" },
+  ).trim();
+  const name = `muz-core-${shortHash}`;
+  const path = resolve(directory, `${name}.tgz`),
     tar = `${path}.tar`;
   try {
     execFileSync("git", [
@@ -61,7 +67,7 @@ export async function createSourceArchive(core, build, wasm, directory) {
       core,
       "archive",
       "--format=tar",
-      `--prefix=muz-core-${build.commit}/`,
+      `--prefix=${name}/`,
       "-o",
       tar,
       build.commit,
