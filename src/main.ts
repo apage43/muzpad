@@ -374,6 +374,12 @@ function tree() {
         .join("")
     );
   }
+  const coreFiles = files(
+    Object.fromEntries(
+      Object.entries(catalog.libraries).filter(([p]) => !p.includes("/")),
+    ),
+    "library",
+  );
   const coreFolders = ["std", "contrib", "docs"]
     .map((folder) => {
       const items = Object.fromEntries(
@@ -392,7 +398,7 @@ function tree() {
     ).map((el) => [el.dataset.folder!, el.open]),
   );
   $("file-tree").innerHTML =
-    `<details data-folder="project" open><summary>Project <span>${Object.keys(project.files).length}</span></summary>${files(project.files, "project")}</details><details class="core-tree" data-folder="core" open><summary>muz-core${catalog.engine?.sourceArchive ? ` <a class="source-archive" href="${esc(catalog.engine.sourceArchive)}" title="Download muz-core source at ${esc(catalog.engine.commit)}">.tgz</a>` : ""}</summary>${coreFolders}</details>${catalog.gists.length ? `<details data-folder="gists" open><summary>Gists</summary>${catalog.gists.map((p) => `<a class="project-link${p.gist.split("/")[0] === project.gist?.split("/")[0] ? " active" : ""}" href="${esc(gistURL(p.gist))}" data-gist="${esc(p.gist)}" aria-current="${p.gist.split("/")[0] === project.gist?.split("/")[0]}"><span>↗</span>${p.gist.split("/")[0] === project.gist?.split("/")[0] ? '<em class="project-current">Open</em>' : ""}<strong>${esc(p.title)}</strong><small>${esc(p.description || "Open from GitHub gist")}</small></a>`).join("")}</details>` : ""}`;
+    `<details data-folder="project" open><summary>Project <span>${Object.keys(project.files).length}</span></summary>${files(project.files, "project")}</details><details class="core-tree" data-folder="core" open><summary>muz-core${catalog.engine?.sourceArchive ? ` <a class="source-archive" href="${esc(catalog.engine.sourceArchive)}" title="Download muz-core source at ${esc(catalog.engine.commit)}">.tgz</a>` : ""}</summary>${coreFiles}${coreFolders}</details>${catalog.gists.length ? `<details data-folder="gists" open><summary>Gists</summary>${catalog.gists.map((p) => `<a class="project-link${p.gist.split("/")[0] === project.gist?.split("/")[0] ? " active" : ""}" href="${esc(gistURL(p.gist))}" data-gist="${esc(p.gist)}" aria-current="${p.gist.split("/")[0] === project.gist?.split("/")[0]}"><span>↗</span>${p.gist.split("/")[0] === project.gist?.split("/")[0] ? '<em class="project-current">Open</em>' : ""}<strong>${esc(p.title)}</strong><small>${esc(p.description || "Open from GitHub gist")}</small></a>`).join("")}</details>` : ""}`;
   if (!query)
     $("file-tree")
       .querySelectorAll<HTMLDetailsElement>("details[data-folder]")

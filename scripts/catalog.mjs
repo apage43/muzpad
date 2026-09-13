@@ -27,6 +27,7 @@ export async function buildCatalog(configPath) {
   const root = dirname(configPath),
     core = resolve(root, config.core);
   const libraries = {
+    "README.md": await readFile(resolve(core, "README.md"), "utf8"),
     ...(await sources(resolve(core, "std"), "std/")),
     ...(await sources(resolve(core, "contrib"), "contrib/")),
     ...(await sources(resolve(core, "docs"), "docs/")),

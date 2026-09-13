@@ -9,6 +9,7 @@ test("catalog includes gist links without bundling pieces, plus the full core tr
   try {
     for (const dir of ["core/std", "core/docs", "core/contrib/nested/pack"])
       await mkdir(join(root, dir), { recursive: true });
+    await writeFile(join(root, "core/README.md"), "# muz");
     await writeFile(join(root, "core/docs/guide.md"), "# Guide");
     await writeFile(join(root, "core/contrib/nested/pack/README.md"), "# Pack");
     await writeFile(
