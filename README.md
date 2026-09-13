@@ -71,8 +71,9 @@ preserved across revisions.
 - Import a gist URL or ID. The page URL gains `?gist=ID` so it can be shared;
   `?gist=ID/REVISION` pins a particular version. A gist workspace has a **View gist**
   link in place of the project download button. Edits stay in browser storage and
-  are not published back to GitHub or included in a shared link. Reloading restores
-  local edits for the same gist; explicitly importing it again fetches the saved gist.
+  are not published back to GitHub or included in a shared link. Opening or reloading
+  a `?gist=` URL always fetches its source from GitHub, even for the same gist or
+  pinned revision. Saved browser edits remain available in Previous workspace.
 - Download folder/ZIP/new projects as ZIPs. Local draft recovery uses browser
   storage; clearing site data removes drafts. Previous workspace restores the
   preceding project when switching projects.
@@ -123,7 +124,8 @@ The configured core path must match the WASM crate's Cargo dependency.
 Gists are read anonymously, including secret gists when their link is known.
 **Secret means unlisted, not access-controlled**; links included in the sidebar are
 visible to site visitors. Loading requires GitHub access and is subject to its
-anonymous API rate limits. Already recovered local drafts work without refetching.
+anonymous API rate limits. Without a `?gist=` URL, local drafts recover without
+refetching. A failed gist request shows an error instead of opening a cached copy.
 No GitHub token is stored in the application.
 
 Gists support `.muz` and `.md` files, plus optional `muzpad.json` with `title`,

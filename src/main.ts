@@ -530,11 +530,11 @@ function tree() {
       };
     });
 }
-function preserveProject(required = false) {
+function preserveProject(required = false, previous = project) {
   // Keep the previous workspace recoverable when switching projects without a modal.
-  if (project) {
+  if (previous) {
     try {
-      localStorage.setItem("muzpad-previous-v1", JSON.stringify(project));
+      localStorage.setItem("muzpad-previous-v1", JSON.stringify(previous));
     } catch {
       if (required)
         throw new Error(
@@ -984,14 +984,14 @@ $("apply-loop").onclick = () => {
 let gistRequest: AbortController | undefined;
 function gistURL(ref?: string) {
   const url = new URL(location.href);
-  if (ref) url.searchParams.set("gist", ref);
+  if (ref !== undefined) url.searchParams.set("gist", ref);
   else url.searchParams.delete("gist");
   return url.href;
 }
 function setGistURL(ref?: string) {
   history.replaceState(null, "", gistURL(ref));
 }
-async function importGist(input: string) {
+async function importGist(input: string, previous = project) {
   gistRequest?.abort();
   const request = new AbortController();
   gistRequest = request;
@@ -999,7 +999,7 @@ async function importGist(input: string) {
   try {
     const next = await loadGist(input, { signal: request.signal });
     if (request.signal.aborted) return;
-    preserveProject();
+    preserveProject(false, previous);
     await openProject(next);
   } catch (e) {
     if (!request.signal.aborted) throw e;
@@ -1322,9 +1322,12 @@ try {
     }
   } catch {}
   const requested = new URL(location.href).searchParams.get("gist");
-  const needsGist = requested && requested !== restored?.gist;
+  const needsGist = requested !== null;
+  // A share URL always fetches its source. Keep the draft recoverable, but never
+  // present it as the requested gist, including when GitHub cannot be reached.
+  if (needsGist && restored) preserveProject(false, restored);
   const initialBuild = openProject(
-    restored ?? {
+    (!needsGist && restored) || {
       id: "untitled-project",
       title: "Untitled project",
       entry: "song.muz",
@@ -1335,7 +1338,7 @@ try {
   if (needsGist) {
     // Keep the requested URL on failure so a reload can retry the same gist.
     setGistURL(requested);
-    await importGist(requested);
+    await importGist(requested, restored);
   } else {
     await initialBuild;
   }

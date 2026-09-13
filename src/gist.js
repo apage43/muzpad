@@ -64,6 +64,7 @@ export async function loadGist(input, { signal, fetcher = fetch } = {}) {
   const response = await fetcher(`https://api.github.com/gists/${ref}`, {
     signal,
     credentials: "omit",
+    cache: "no-store",
     headers: { Accept: "application/vnd.github+json" },
   });
   if (!response.ok) {
@@ -95,7 +96,11 @@ export async function loadGist(input, { signal, fetcher = fetch } = {}) {
         raw.hostname !== "gist.githubusercontent.com"
       )
         throw new Error("Unsupported gist file URL.");
-      const file = await fetcher(raw.href, { signal, credentials: "omit" });
+      const file = await fetcher(raw.href, {
+        signal,
+        credentials: "omit",
+        cache: "no-store",
+      });
       if (!file.ok) throw new Error(`Could not load ${name} (${file.status}).`);
       content = await boundedText(file, 4_000_000 - total);
     }

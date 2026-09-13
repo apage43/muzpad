@@ -41,6 +41,7 @@ test("imports mapped nested source and metadata, retaining the requested share r
     fetcher: async (url, options) => {
       assert.equal(url, `https://api.github.com/gists/${id}/${revision}`);
       assert.equal(options.credentials, "omit");
+      assert.equal(options.cache, "no-store");
       return response(fixture());
     },
   });
@@ -56,8 +57,12 @@ test("fetches truncated text from GitHub raw storage and rejects unsafe or incom
     raw_url: `https://gist.githubusercontent.com/user/${id}/raw/nested.muz`,
   };
   const result = await loadGist(id, {
-    fetcher: async (url) =>
-      url.includes("api.github") ? response(data) : new Response("full source"),
+    fetcher: async (url, options) => {
+      assert.equal(options.cache, "no-store");
+      return url.includes("api.github")
+        ? response(data)
+        : new Response("full source");
+    },
   });
   assert.equal(result.files["parts/voice.muz"], "full source");
   data.files["nested.muz"].raw_url = "https://example.com/file";
