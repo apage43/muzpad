@@ -248,7 +248,11 @@ $("reload-folder").onclick = async () => {
     const files = await readFolder(target.root);
     if (mount !== target || project !== current) return;
     const connected = new MountedFolder(target.root, files);
-    const build = importProject(files, target.root.name, true, current.entry);
+    const build = importProject(files, target.root.name, {
+      preserveRequired: true,
+      preferredEntry: current.entry,
+      keepSession: true,
+    });
     mount = connected;
     project.folderName = target.root.name;
     mountedSettings = projectDiskFiles()["muzpad.json"];
@@ -346,12 +350,14 @@ function saveDraft() {
   draftTimer = setTimeout(persistDraft, 400);
 }
 window.addEventListener("pagehide", persistDraft);
-function openProject(next: Project, rebuild = true) {
+function openProject(next: Project, rebuild = true, keepSession = false) {
   mount = undefined;
   mountedSettings = undefined;
-  player.stop();
-  player.loop = null;
-  $("loop").setAttribute("aria-pressed", "false");
+  if (!keepSession) {
+    player.stop();
+    player.loop = null;
+    $("loop").setAttribute("aria-pressed", "false");
+  }
   runToken++;
   compiler.reset();
   busy = false;
@@ -367,35 +373,50 @@ function openProject(next: Project, rebuild = true) {
       `https://gist.github.com/${parseGist(project.gist)}`;
   setGistURL(project.gist);
   updateFolderState();
-  revision = 0;
-  accepted = -1;
-  acceptedEntry = "";
-  tabs = [];
-  editor.states.clear();
-  editor.path = "";
-  views = undefined;
-  status = undefined;
-  selected = "";
-  arrangement.reset();
-  player.selectAnalysis(null);
-  $("analysis-source").innerHTML = '<option value="">Master</option>';
-  $("analysis-detail").textContent = "Master output";
-  player.worker?.terminate();
-  player.worker = undefined;
-  $("play").setAttribute("disabled", "");
-  $("stop").setAttribute("disabled", "");
+  if (keepSession) revision++;
+  else {
+    revision = 0;
+    accepted = -1;
+    acceptedEntry = "";
+  }
+  if (keepSession) {
+    tabs = tabs.filter(
+      (key) =>
+        key.startsWith("library:") ||
+        project.files[key.slice("project:".length)] !== undefined,
+    );
+  } else {
+    tabs = [];
+    editor.states.clear();
+    editor.path = "";
+  }
+  if (!keepSession) {
+    views = undefined;
+    status = undefined;
+    selected = "";
+    arrangement.reset();
+    player.selectAnalysis(null);
+    $("analysis-source").innerHTML = '<option value="">Master</option>';
+    $("analysis-detail").textContent = "Master output";
+    player.worker?.terminate();
+    player.worker = undefined;
+    $("play").setAttribute("disabled", "");
+    $("stop").setAttribute("disabled", "");
+    $("section").innerHTML = '<option value="">Sections</option>';
+    $("clock").textContent = "0:00";
+    $("length").textContent = "/ —";
+    $("jump-source").setAttribute("disabled", "");
+    $("selection-label").textContent = "Inspector";
+    $("inspector").innerHTML =
+      '<p class="empty">Select a track or note to inspect its performance and sound.</p>';
+  }
   $("project-title").textContent = project.title;
-  $("section").innerHTML = '<option value="">Sections</option>';
   $("diagnostic-list").replaceChildren();
-  $("clock").textContent = "0:00";
-  $("length").textContent = "/ —";
-  $("jump-source").setAttribute("disabled", "");
-  $("selection-label").textContent = "Inspector";
-  $("inspector").innerHTML =
-    '<p class="empty">Select a track or note to inspect its performance and sound.</p>';
   tree();
   scheduleEntryScan(0);
-  openFile(project.entry);
+  if (keepSession && (library || project.files[file] !== undefined))
+    openFile(file, library);
+  else openFile(project.entry);
   updateRevision();
   showView();
   persistDraft();
@@ -846,8 +867,15 @@ function validateFiles(files: Record<string, string>) {
 function importProject(
   files: Record<string, string>,
   title: string,
-  preserveRequired = false,
-  preferredEntry?: string,
+  {
+    preserveRequired = false,
+    preferredEntry,
+    keepSession = false,
+  }: {
+    preserveRequired?: boolean;
+    preferredEntry?: string;
+    keepSession?: boolean;
+  } = {},
 ) {
   validateFiles(files);
   let settings: any = {};
@@ -864,20 +892,24 @@ function importProject(
           ? "song.muz"
           : Object.keys(files).find((p) => p.endsWith(".muz"))!;
   preserveProject(preserveRequired);
-  return openProject({
-    id: title.replace(/[^a-z0-9-]/gi, "-"),
-    title: typeof settings.title === "string" ? settings.title : title,
-    entry,
-    entries: Array.isArray(settings.entries)
-      ? settings.entries.filter(
-          (p: unknown) =>
-            typeof p === "string" &&
-            p.endsWith(".muz") &&
-            files[p] !== undefined,
-        )
-      : undefined,
-    files,
-  });
+  return openProject(
+    {
+      id: title.replace(/[^a-z0-9-]/gi, "-"),
+      title: typeof settings.title === "string" ? settings.title : title,
+      entry,
+      entries: Array.isArray(settings.entries)
+        ? settings.entries.filter(
+            (p: unknown) =>
+              typeof p === "string" &&
+              p.endsWith(".muz") &&
+              files[p] !== undefined,
+          )
+        : undefined,
+      files,
+    },
+    true,
+    keepSession,
+  );
 }
 
 $("theme-toggle").onclick = () => {

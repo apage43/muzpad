@@ -45,6 +45,8 @@ preserved across revisions.
   **Reload** rereads the mounted folder, including added/deleted files and entry
   metadata, and automatically rebuilds the selected entrypoint if its file still
   exists, falling back to the folder's default entrypoint if it was removed.
+  Reload keeps the current file tabs, arrangement view, and transport state;
+  playback continues during rebuilding and failed builds keep the accepted audio.
   It preserves the latest browser copy in
   Previous workspace before replacing it. Read failures keep the current workspace.
   Mounting again opens the current disk files; a recovered draft is clearly labeled

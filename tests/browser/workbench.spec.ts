@@ -531,7 +531,7 @@ test("mounted folder saves source and new files, and refuses external changes", 
   await expect(page.locator("#download")).toBeVisible();
 });
 
-test("mounted folder reload rebuilds the selected entry instead of the disk default", async ({
+test("mounted folder reload preserves the selected entry and active playback", async ({
   page,
   browserName,
 }) => {
@@ -542,7 +542,7 @@ test("mounted folder reload rebuilds the selected entry instead of the disk defa
       for (const [path, source] of Object.entries({
         "muzpad.json": JSON.stringify({ entry: "song.muz" }),
         "song.muz":
-          'song({tracks:[track("default", phrase("C4:q"), synth("init"))],tail:0.1})',
+          'song({tracks:[track("default", phrase("C4:q").repeat(128), synth("init"))],tail:0.1})',
         "audition.muz":
           'song({tracks:[track("audition", phrase("D4:q"), synth("init"))],tail:0.1})',
       })) {
@@ -567,29 +567,112 @@ test("mounted folder reload rebuilds the selected entry instead of the disk defa
   await page.locator("#mount-folder").click();
   await expect(page.locator("#project-title")).toHaveText("Audition project");
   await expect(page.locator("#build-state")).toHaveText("Accepted");
+  await page.locator(".range-menu > summary").click();
+  await page.locator("#loop-start").fill("0");
+  await page.locator("#loop-end").fill("64");
+  await page.locator("#apply-loop").click();
+  await page.locator(".range-menu > summary").click();
+  await page.locator("#play").click();
+  const seconds = async () => {
+    const [minutes, seconds] = (await page.locator("#clock").innerText())
+      .split(":")
+      .map(Number);
+    return minutes * 60 + seconds;
+  };
+  await expect.poll(seconds).toBeGreaterThanOrEqual(2);
   await page.locator("#entry-select").selectOption("audition.muz");
   await expect(page.locator("#entry-label")).toHaveText(
     "Active entry: song.muz",
   );
+  await page.locator('[data-kind="project"][data-file="song.muz"]').click();
+  await page.locator("#zoom-in").click();
+  const zoom = await page.locator("#zoom").inputValue();
   await page.evaluate(async () => {
     const root = await navigator.storage.getDirectory();
     const writer = await (
       await root.getFileHandle("audition.muz")
     ).createWritable();
     await writer.write(
-      'song({tracks:[track("audition_updated", phrase("E4:q"), synth("init"))],tail:0.1})',
+      'song({tracks:[track("audition_updated", phrase("E4:q").repeat(128), synth("init"))],tail:0.1})',
     );
     await writer.close();
   });
-  await page.locator("#reload-folder").click();
+  // Hold the replacement engine's WASM fetch so playback must survive the rebuild.
+  let releaseBuild!: () => void;
+  const buildGate = new Promise<void>((resolve) => {
+    releaseBuild = resolve;
+  });
+  await page.route("**/muz.wasm", async (route) => {
+    await buildGate;
+    await route.continue();
+  });
+  const beforeReload = await seconds();
+  try {
+    await page.locator("#reload-folder").click();
+    await expect(page.locator("#build-state")).toHaveText("Compiling");
+    await expect(page.locator("#play")).toHaveText("Ⅱ Pause");
+    await expect(page.locator("#play")).toBeEnabled();
+    await expect(page.locator("#loop")).toHaveAttribute("aria-pressed", "true");
+    await expect(
+      page.locator("#analysis-source option[value='default']"),
+    ).toHaveCount(1);
+    await expect.poll(seconds).toBeGreaterThan(beforeReload);
+    await expect(page.locator("#audio-health")).toHaveText("Audio running");
+  } finally {
+    releaseBuild();
+  }
   await expect(
     page.locator("#analysis-source option[value='audition_updated']"),
   ).toHaveCount(1);
   await expect(page.locator("#build-state")).toHaveText("Accepted");
   await expect(page.locator("#entry-select")).toHaveValue("audition.muz");
-  await expect(page.locator("#source-path")).toHaveText("audition.muz");
+  await expect(page.locator("#source-path")).toHaveText("song.muz");
+  await expect(page.locator('[data-tab="project:audition.muz"]')).toBeVisible();
+  await expect(page.locator("#zoom")).toHaveValue(zoom);
   await expect(page.locator("#entry-label")).not.toContainText("song.muz");
   await expect(page.locator("#workspace-mode")).toHaveText("Folder connected");
+  await expect(page.locator("#play")).toHaveText("Ⅱ Pause");
+  await expect(page.locator("#loop")).toHaveAttribute("aria-pressed", "true");
+  await expect.poll(seconds).toBeGreaterThan(beforeReload);
+
+  // A rejected disk edit keeps the accepted arrangement and audio running.
+  await page.evaluate(async () => {
+    const root = await navigator.storage.getDirectory();
+    const writer = await (
+      await root.getFileHandle("audition.muz")
+    ).createWritable();
+    await writer.write("bad_symbol();");
+    await writer.close();
+  });
+  await page.locator("#reload-folder").click();
+  await expect(page.locator("#build-state")).toHaveText("Needs attention");
+  await expect(page.locator("#diagnostic-list")).toContainText("bad_symbol");
+  await expect(
+    page.locator("#analysis-source option[value='audition_updated']"),
+  ).toHaveCount(1);
+  await expect(page.locator("#play")).toHaveText("Ⅱ Pause");
+  const afterFailure = await seconds();
+  await expect.poll(seconds).toBeGreaterThan(afterFailure);
+
+  // Reload also respects a paused transport rather than starting it.
+  await page.locator("#play").click();
+  await page.evaluate(async () => {
+    const root = await navigator.storage.getDirectory();
+    const writer = await (
+      await root.getFileHandle("audition.muz")
+    ).createWritable();
+    await writer.write(
+      'song({tracks:[track("recovered", phrase("F4:q").repeat(128), synth("init"))],tail:0.1})',
+    );
+    await writer.close();
+  });
+  await page.locator("#reload-folder").click();
+  await expect(
+    page.locator("#analysis-source option[value='recovered']"),
+  ).toHaveCount(1);
+  await expect(page.locator("#build-state")).toHaveText("Accepted");
+  await expect(page.locator("#play")).toHaveText("▶ Play");
+  await expect.poll(seconds).toBeGreaterThanOrEqual(afterFailure);
 });
 
 test("Entrypoints excludes helper modules and refreshes after edits", async ({
