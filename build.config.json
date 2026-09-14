@@ -1,12 +1,6 @@
 {
   "core": "../muz-core",
-  "gists": [
-    {
-      "gist": "780004d83ed44fade4faacbb44b96637",
-      "title": "Still Our Own",
-      "description": "A piece for native muz instruments"
-    }
-  ],
+  "gists": [],
   "sourceArchive": {
     "bucket": "plausibly-ml",
     "prefix": "muz-core",
