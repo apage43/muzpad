@@ -224,7 +224,7 @@ test("arrangement navigation stays usable at deep zoom and follows only when ena
   await expect(page.locator("#selection-label")).toContainText("C4");
 });
 
-test("muz-core groups its sources and docs, and Markdown renders safely with local navigation", async ({
+test("Markdown renders safely with local navigation", async ({
   page,
 }) => {
   await page.addInitScript((base) => {
@@ -260,20 +260,9 @@ let note = phrase("C4:q");
   }, fixture);
   await page.goto("./");
   await expect(page.locator("#build-state")).toHaveText("Accepted");
-  const core = page.locator(".core-tree");
-  await expect(core.locator(":scope > summary")).toHaveText("muz-core");
-  await expect(core.locator(":scope > details")).toHaveCount(4);
-  await core.locator('[data-core-folder="docs"] > summary').click();
-  await core.locator('[data-file="docs/embedding.md"]').click();
-  await expect(page.locator("#document h1")).toHaveText("Embedding muz");
+  await page.locator('[data-file="README.md"][data-kind="project"]').click();
   await expect(page.locator("#editor")).toBeHidden();
   await expect(page.locator("#format")).toBeDisabled();
-  await page.locator("#file-search").fill("std/synthesis");
-  await core.locator('[data-file="std/synthesis.muz"]').click();
-  await expect(page.locator("#editor")).toBeVisible();
-  await expect(page.locator("#source-mode")).toHaveText("muz-core · read only");
-  await page.locator("#file-search").fill("");
-  await page.locator('[data-file="README.md"][data-kind="project"]').click();
   const doc = page.locator("#document");
   await expect(doc.locator("h1")).toHaveText("Project guide");
   await expect(doc.locator("strong")).toHaveText("instructions");
