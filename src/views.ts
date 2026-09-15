@@ -319,13 +319,21 @@ export class Arrangement {
     const x = (beat: number) => 130 + beat * this.scale - scroll;
     const start = Math.max(0, scroll / this.scale),
       end = Math.min(this.end, (scroll + width - 130) / this.scale);
+    const meter = this.views.graph.transport.meter ?? [4, 4],
+      bar = (meter[0] * 4) / meter[1];
+    const grid = Math.min(bar, 2 ** Math.ceil(Math.log2(12 / this.scale)));
+    const step =
+      grid * this.scale < 12
+        ? bar * 2 ** Math.ceil(Math.log2(12 / (bar * this.scale)))
+        : grid;
     c.save();
     c.beginPath();
     c.rect(0, 58, width, height - 58);
     c.clip();
-    this.rows.forEach((track, i) => {
+    // Lane shading first: the grid is a backdrop guide, never a splitter.
+    for (const track of this.rows) {
       const top = track.top - vertical;
-      if (top + track.height < 58 || top > height) return;
+      if (top + track.height < 58 || top > height) continue;
       if (track.kind === "group") {
         c.fillStyle = color("#151515");
         c.fillRect(0, top, width, track.height);
@@ -342,6 +350,27 @@ export class Arrangement {
       c.moveTo(0, top + 0.5);
       c.lineTo(width, top + 0.5);
       c.stroke();
+    }
+    c.save();
+    c.beginPath();
+    c.rect(130, 58, width - 130, height - 58);
+    c.clip();
+    for (let b = Math.ceil(start / step) * step; b <= end; b += step) {
+      c.strokeStyle = color(
+        Math.abs(b / bar - Math.round(b / bar)) < 0.0001 ? "#292929" : "#222",
+      );
+      c.globalAlpha = 0.55;
+      c.beginPath();
+      c.moveTo(Math.round(x(b)) + 0.5, 58);
+      c.lineTo(Math.round(x(b)) + 0.5, height);
+      c.stroke();
+    }
+    c.globalAlpha = 1;
+    c.restore();
+    // Notes and lane text overlay the grid so a bar line never cuts a hit in half.
+    for (const track of this.rows) {
+      const top = track.top - vertical;
+      if (top + track.height < 58 || top > height) continue;
       c.save();
       c.beginPath();
       c.rect(130, 58, width - 130, height - 58);
@@ -416,28 +445,6 @@ export class Arrangement {
         c.fillText(`${track.notes.length} notes`, 12, top + 40);
       }
       c.restore();
-    });
-    c.restore();
-    const meter = this.views.graph.transport.meter ?? [4, 4],
-      bar = (meter[0] * 4) / meter[1];
-    const grid = Math.min(bar, 2 ** Math.ceil(Math.log2(12 / this.scale)));
-    const step =
-      grid * this.scale < 12
-        ? bar * 2 ** Math.ceil(Math.log2(12 / (bar * this.scale)))
-        : grid;
-    c.save();
-    c.beginPath();
-    c.rect(130, 28, width - 130, height - 28);
-    c.clip();
-    for (let b = Math.ceil(start / step) * step; b <= end; b += step) {
-      c.strokeStyle = color(
-        Math.abs(b / bar - Math.round(b / bar)) < 0.0001 ? "#292929" : "#222",
-      );
-      c.globalAlpha = 0.55;
-      c.beginPath();
-      c.moveTo(Math.round(x(b)) + 0.5, 36);
-      c.lineTo(Math.round(x(b)) + 0.5, height);
-      c.stroke();
     }
     c.restore();
     // The ruler and track names stay fixed while musical content pans beneath them.
