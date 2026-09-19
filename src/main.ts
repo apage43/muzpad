@@ -135,6 +135,9 @@ const arrangement = new Arrangement($("arrangement"));
 enableGraphPanning($("graph-view"));
 arrangement.onSeek = (beat) => seek(beat);
 arrangement.onSelect = (track, note) => selectTrack(track, note);
+arrangement.onAudition = (muted, solo) => {
+  void player.setAudition(muted, solo).catch(error);
+};
 
 function projectDiskFiles() {
   return {

@@ -127,6 +127,12 @@ self.onmessage = ({ data }) => {
           pending = undefined;
         }
         value = { discarded: matches };
+      } else if (data.type === "audition" && initialized) {
+        value = engine.call({
+          command: "audition",
+          muted: data.muted,
+          solo: data.solo,
+        });
       } else if (data.type === "analysis") {
         analysis = data.id;
       } else if (data.type === "loop" && initialized) {

@@ -75,6 +75,8 @@ struct Pending {
 }
 #[derive(Default)]
 struct Host {
+    muted: Vec<String>,
+    solo: Vec<String>,
     engine: Option<AudioEngine>,
     session: Option<Session>,
     context: muz::host::HostContext,
@@ -388,6 +390,29 @@ impl Host {
                 self.pending = None;
                 Ok(json!({"discarded":true}))
             }
+            "audition" => {
+                let muted: Vec<String> = serde_json::from_value(v["muted"].clone())?;
+                let solo: Vec<String> = serde_json::from_value(v["solo"].clone())?;
+                let session = self
+                    .session
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("rebuild a project first"))?;
+                ensure!(
+                    muted.len() <= session.tracks.len() && solo.len() <= session.tracks.len(),
+                    "too many audition tracks"
+                );
+                ensure!(
+                    muted
+                        .iter()
+                        .chain(&solo)
+                        .all(|id| session.tracks.iter().any(|t| t.id.as_str() == id)),
+                    "unknown audition track"
+                );
+                self.muted = muted;
+                self.solo = solo;
+                self.apply_audition(true)?;
+                Ok(json!({"muted":self.muted,"solo":self.solo}))
+            }
             "status" => self.status(),
             "seek" => {
                 let beat = v["beat"].as_f64().unwrap_or(0.0);
@@ -510,11 +535,33 @@ impl Host {
         self.config = Some(pending.config);
         self.context = pending.context;
         self.session = Some(pending.session);
+        self.apply_audition(false)?;
         self.pcm.resize(2048, 0.);
         self.analysis.resize(2048, 0.);
         let mut status = self.status()?;
         status["effect"] = serde_json::to_value(pending.effect)?;
         Ok(status)
+    }
+    fn apply_audition(&mut self, ramp: bool) -> Result<()> {
+        let session = self.session.as_ref().unwrap();
+        self.muted
+            .retain(|id| session.tracks.iter().any(|t| t.id.as_str() == id));
+        self.solo
+            .retain(|id| session.tracks.iter().any(|t| t.id.as_str() == id));
+        let audible = session
+            .tracks
+            .iter()
+            .filter(|t| {
+                !self.muted.iter().any(|id| t.id.as_str() == id)
+                    && (self.solo.is_empty() || self.solo.iter().any(|id| t.id.as_str() == id))
+            })
+            .map(|t| t.id.to_string())
+            .collect::<Vec<_>>();
+        self.engine
+            .as_mut()
+            .unwrap()
+            .set_track_audibility(&audible, ramp)?;
+        Ok(())
     }
     fn status(&self) -> Result<Value> {
         let s = self

@@ -62,6 +62,14 @@ changes use the engine's reconciliation decisions and cutover fades.
   entrypoint and the still-active one until Rebuild accepts the change.
 - Play/pause, stop, restart, seek on the ruler or by section, and loop a section
   or an explicit beat range. Range values use zero-based musical beats.
+- Use **M** and **S** beside arrangement tracks to mute or solo temporarily.
+  Multiple solos combine; mute takes precedence. Kit-group buttons act on their
+  explicit lanes (a dashed button means some lanes are enabled). Controls survive
+  rebuilds for unchanged track IDs and reset when opening another project; they
+  do not edit source or ZIP exports. Output and all sends are gated with a short
+  fade; existing shared-effect tails decay naturally. Analysis and sidechain
+  detectors keep running. Changes follow queued audio (up to about half a second),
+  without seeking or restarting playback.
 - Inspect arrangement notes, note performance data, routing, native voice graphs,
   automation curves, master/track peak meters, and output waveform/spectrum.
 - Select a track to analyze its output, or choose Master in the analysis menu.

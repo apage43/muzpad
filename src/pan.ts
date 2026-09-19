@@ -20,6 +20,8 @@ export function enableGraphPanning(
     if (
       event.button !== 0 ||
       !event.isPrimary ||
+      (event.target instanceof Element &&
+        !!event.target.closest("button, input, select, a")) ||
       !viewport.classList.contains("pannable")
     )
       return;

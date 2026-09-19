@@ -10,6 +10,79 @@ const files = {
     'use "std/synthesis" as s; let line = track("lead", phrase("C4:q E4:q G4:q B4:q"), s.pluck());',
 };
 
+test("temporary mute/solo uses exact IDs, gates sends and survives structural apply", async () => {
+  const compiler = await createEngine(bytes);
+  const renderer = await createEngine(bytes);
+  const source =
+    'song({tracks:[track("x",note(60,32b),voice_patch("p",{nodes:[{id:"v",op:"param",value:0.1}],output:"v"}),{sends:{room:{gain:0,pre:true}}}),track("x.other",note(64,32b),voice_patch("p",{nodes:[{id:"v",op:"param",value:0.2}],output:"v"}))],buses:[bus("room",[])],tail:0})';
+  const compile = (source) =>
+    compiler.call({
+      command: "compile",
+      files: { "song.muz": source },
+      entry: "song.muz",
+    });
+  const snapshot = compile(source).snapshot;
+  renderer.call({ command: "load", snapshot, rate: 48000 });
+  const measure = () => {
+    renderer.call({ command: "render", frames: 1024 });
+    return Math.max(...renderer.audio(1024).subarray(1000).map(Math.abs));
+  };
+  const all = measure();
+  const before = renderer.call({ command: "status" });
+  renderer.call({ command: "audition", muted: [], solo: ["x"] });
+  const one = measure();
+  assert.ok(one > 0 && one < all, "solo x does not also solo dotted x.other");
+  renderer.call({ command: "audition", muted: ["x"], solo: ["x"] });
+  assert.equal(measure(), 0, "mute beats solo, including the pre-fader send");
+  renderer.call({ command: "audition", muted: [], solo: ["x", "x.other"] });
+  assert.equal(measure(), all, "multiple solos combine");
+  const after = renderer.call({ command: "status" });
+  assert.equal(after.revision, before.revision);
+  assert.equal(after.generation, before.generation);
+  assert.ok(after.beat > before.beat);
+  renderer.call({ command: "audition", muted: ["x", "x.other"], solo: [] });
+  assert.throws(
+    () => renderer.call({ command: "audition", muted: ["missing"], solo: [] }),
+    /unknown audition track/,
+  );
+  assert.equal(measure(), 0);
+  const next = compile(
+    source.replace("value:0.1", "value:0.1,min:0,max:1"),
+  ).snapshot;
+  const prepared = renderer.call({
+    command: "prepare",
+    snapshot: next,
+    rate: 48000,
+    request: 91,
+    base_revision: after.revision,
+  });
+  assert.equal(prepared.needs_fade, true);
+  renderer.call({ command: "apply", request: 91 });
+  assert.equal(
+    measure(),
+    0,
+    "new structural routes start muted before any PCM",
+  );
+  renderer.call({ command: "audition", muted: [], solo: [] });
+  assert.ok(measure() > 0);
+  renderer.call({ command: "audition", muted: ["x"], solo: ["x"] });
+  const replacement = compile(
+    'song({tracks:[track("new",note(60,32b),synth("init"))],tail:0})',
+  ).snapshot;
+  renderer.call({
+    command: "prepare",
+    snapshot: replacement,
+    rate: 48000,
+    request: 92,
+    base_revision: renderer.call({ command: "status" }).revision,
+  });
+  renderer.call({ command: "apply", request: 92 });
+  assert.ok(
+    measure() > 0,
+    "removed solo/mute IDs cannot strand new tracks in silence",
+  );
+});
+
 function tinyWav() {
   const frames = 480,
     bytes = new Uint8Array(44 + frames * 2),

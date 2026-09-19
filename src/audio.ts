@@ -116,12 +116,18 @@ export class AudioPlayer {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.requests.delete(id);
-        this.worker?.postMessage({ type: "discard", request: message.request });
+        if (message.type === "prepare" || message.type === "apply")
+          this.worker?.postMessage({
+            type: "discard",
+            request: message.request,
+          });
         reject(
           new Error(
             message.type === "apply"
               ? "Audio apply response exceeded 30 seconds; reload before assuming which revision is active"
-              : "Audio preparation exceeded 30 seconds; the accepted revision is retained",
+              : message.type === "prepare"
+                ? "Audio preparation exceeded 30 seconds; the accepted revision is retained"
+                : "Audio control response exceeded 30 seconds",
           ),
         );
       }, 30000);
@@ -193,6 +199,10 @@ export class AudioPlayer {
     this.playing = true;
     this.node!.port.postMessage({ type: "playing", value: true });
     this.onPlaying();
+  }
+  async setAudition(muted: string[], solo: string[]) {
+    if (!this.worker || !this.loaded) return;
+    await this.call({ type: "audition", muted, solo });
   }
   selectAnalysis(id: string | null) {
     this.analysisSource = id;

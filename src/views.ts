@@ -5,6 +5,7 @@ import {
 } from "./arrangement-layout";
 import { enableGraphPanning } from "./pan";
 import { color } from "./theme";
+import { AuditionState } from "./audition";
 export const escapeHTML = (value: unknown) =>
   String(value ?? "").replace(
     /[&<>"']/g,
@@ -28,6 +29,10 @@ export class Arrangement {
   cursor = document.createElement("div");
   meterLayer = document.createElement("div");
   groupLayer = document.createElement("div");
+  auditionLayer = document.createElement("div");
+  audition = new AuditionState();
+  private controlsLayout = "";
+  onAudition: (muted: string[], solo: string[]) => void = () => {};
   collapsed = new Set<string>();
   views: any;
   end = 1;
@@ -84,6 +89,8 @@ export class Arrangement {
     this.surface.append(this.canvas);
     this.groupLayer.className = "kit-groups";
     parent.append(this.surface, this.cursor, this.meterLayer, this.groupLayer);
+    this.auditionLayer.className = "track-audition";
+    parent.append(this.auditionLayer);
     enableGraphPanning(parent, () => this.setFollow(false));
     let resizeFrame = 0;
     new ResizeObserver(() => {
@@ -206,6 +213,9 @@ export class Arrangement {
     this.parent.scrollTop = 0;
     this.meterLayer.replaceChildren();
     this.groupLayer.replaceChildren();
+    this.auditionLayer.replaceChildren();
+    this.audition.clear();
+    this.controlsLayout = "";
     this.collapsed.clear();
     this.draw();
     this.onNavigation();
@@ -227,10 +237,26 @@ export class Arrangement {
   layout() {
     const focused = (document.activeElement as HTMLElement)?.dataset.kit;
     this.rows = arrangementRows(this.views, this.collapsed);
+    this.audition.retain(this.views.graph.tracks.map((track: any) => track.id));
+    const controlsLayout = JSON.stringify(
+      this.rows.map((row) => [
+        row.id,
+        row.kind,
+        row.label,
+        row.top,
+        row.height,
+        row.members,
+        this.collapsed.has(row.id),
+      ]),
+    );
+    // Detail refreshes must not replace buttons between pointerdown and click.
+    if (controlsLayout === this.controlsLayout) return;
+    this.controlsLayout = controlsLayout;
+    this.renderAudition();
     this.meterLayer.innerHTML = this.rows
       .map(
         (row) =>
-          `<div class="track-meter" style="top:${row.top + (row.kind === "kit" ? 19 : 36)}px" title="${escapeHTML(row.id)} output peak"><span></span></div>`,
+          `<div class="track-meter" style="top:${row.top + (row.kind === "kit" ? 25 : 36)}px" title="${escapeHTML(row.id)} output peak"><span></span></div>`,
       )
       .join("");
     this.groupLayer.innerHTML = this.rows
@@ -249,6 +275,40 @@ export class Arrangement {
             e.stopPropagation();
         };
         if (button.dataset.kit === focused)
+          button.focus({ preventScroll: true });
+      });
+  }
+  renderAudition() {
+    const focused = (document.activeElement as HTMLElement)?.dataset
+      .auditionKey;
+    this.auditionLayer.innerHTML = this.rows
+      .map((row, index) => {
+        const ids = row.kind === "group" ? row.members! : [row.id];
+        return `<div data-audition-row="${index}" style="top:${row.top + 4}px">${(
+          ["muted", "solo"] as const
+        )
+          .map((kind) => {
+            const label = `${kind === "muted" ? "Mute" : "Solo"} ${row.id}${row.kind === "group" ? " kit" : ""}`;
+            return `<button data-audition="${kind}" data-row="${index}" data-audition-key="${escapeHTML(`${kind}:${row.id}`)}" aria-label="${escapeHTML(label)}" title="${escapeHTML(label)}" aria-pressed="${this.audition.state(kind, ids)}" ${ids.length ? "" : "disabled"}>${kind === "muted" ? "M" : "S"}</button>`;
+          })
+          .join("")}</div>`;
+      })
+      .join("");
+    this.auditionLayer
+      .querySelectorAll<HTMLButtonElement>("button")
+      .forEach((button) => {
+        button.onclick = () => {
+          const row = this.rows[Number(button.dataset.row)];
+          this.audition.toggle(
+            button.dataset.audition as "muted" | "solo",
+            row.kind === "group" ? row.members! : [row.id],
+          );
+          this.renderAudition();
+          this.draw();
+          this.onAudition([...this.audition.muted], [...this.audition.solo]);
+        };
+        button.onkeydown = (event) => event.stopPropagation();
+        if (button.dataset.auditionKey === focused)
           button.focus({ preventScroll: true });
       });
   }
@@ -474,7 +534,7 @@ export class Arrangement {
       c.fillStyle = color("#d0d0d0");
       c.save();
       c.beginPath();
-      c.rect(8, top, 118, track.height);
+      c.rect(8, top, 70, track.height);
       c.clip();
       if (track.kind === "kit") {
         c.strokeStyle = color("#555");
@@ -555,9 +615,14 @@ export class Arrangement {
     c.fillText("Bar · beat", 12, 47);
     this.meterLayer.style.left = `${scroll + 96}px`;
     this.groupLayer.style.left = `${scroll}px`;
+    this.auditionLayer.style.left = `${scroll + 82}px`;
+    Array.from(this.auditionLayer.children).forEach((element, index) => {
+      const y = this.rows[index].top - vertical;
+      (element as HTMLElement).hidden = y < 58 || y > height;
+    });
     Array.from(this.meterLayer.children).forEach((el, i) => {
       const row = this.rows[i];
-      const y = row.top + (row.kind === "kit" ? 19 : 36) - vertical;
+      const y = row.top + (row.kind === "kit" ? 25 : 36) - vertical;
       (el as HTMLElement).hidden = row.kind === "group" || y < 58 || y > height;
     });
     this.groupLayer
