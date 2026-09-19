@@ -23,6 +23,22 @@ test.beforeEach(async ({ page }) => {
   }, fixture);
 });
 
+test("Ctrl+Enter rebuilds without inserting a line", async ({ page }) => {
+  await page.goto("./");
+  await expect(page.locator("#build-state")).toHaveText("Accepted");
+  await page.locator('[data-file="production.muz"]').click();
+  await page.locator(".cm-content").click();
+  await page.keyboard.press("Control+End");
+  await page.keyboard.type(" ");
+  await expect(page.locator("#revision")).toContainText("Edited");
+  const lines = await page.locator(".cm-line").count();
+
+  await page.keyboard.press("Control+Enter");
+
+  await expect(page.locator("#revision")).toHaveText("Revision 2 accepted");
+  await expect(page.locator(".cm-line")).toHaveCount(lines);
+});
+
 test("static deployment: playback, rejected edits, source navigation, views, and export", async ({
   page,
 }) => {

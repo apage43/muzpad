@@ -1,4 +1,9 @@
-import { EditorState, Compartment, type Extension } from "@codemirror/state";
+import {
+  EditorState,
+  Compartment,
+  Prec,
+  type Extension,
+} from "@codemirror/state";
 import { EditorView, keymap } from "@codemirror/view";
 import { basicSetup } from "codemirror";
 import {
@@ -68,15 +73,17 @@ export class SourceEditor {
       muz,
       syntaxHighlighting(palette),
       this.readonly.of(EditorState.readOnly.of(false)),
-      keymap.of([
-        {
-          key: "Mod-Enter",
-          run: () => {
-            run();
-            return true;
+      Prec.highest(
+        keymap.of([
+          {
+            key: "Mod-Enter",
+            run: () => {
+              run();
+              return true;
+            },
           },
-        },
-      ]),
+        ]),
+      ),
       EditorView.updateListener.of((update) => {
         if (update.docChanged && !this.suppress)
           onChange(update.state.doc.toString());
