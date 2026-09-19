@@ -56,6 +56,10 @@ test("kit lanes collapse, zoom into hits, select physical tracks, and retain sou
     el.scrollLeft = 0;
   });
   await expect(page.locator("#arrangement")).toHaveAttribute(
+    "data-inspection-state",
+    "detail",
+  );
+  await expect(page.locator("#arrangement")).toHaveAttribute(
     "data-kit-view",
     "hits",
   );

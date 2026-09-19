@@ -50,6 +50,19 @@ export class Arrangement {
   get visibleBeats() {
     return Math.max(1, this.width - 142) / this.scale;
   }
+  visibleRange() {
+    const start = Math.max(0, this.parent.scrollLeft / this.scale);
+    return { start, end: Math.min(this.end, start + this.visibleBeats) };
+  }
+  visibleTrackIds() {
+    const top = this.parent.scrollTop;
+    const bottom = top + this.parent.clientHeight;
+    return this.rows
+      .filter((row) => row.top + row.height >= top + 58 && row.top <= bottom)
+      .flatMap((row) =>
+        row.kind === "group" ? (row.members ?? []) : [row.id],
+      );
+  }
   beatAt(x: number) {
     return (x - 130 + this.parent.scrollLeft) / this.scale;
   }
@@ -80,7 +93,14 @@ export class Arrangement {
         this.onNavigation();
       });
     }).observe(parent);
-    parent.addEventListener("scroll", () => this.draw(), { passive: true });
+    parent.addEventListener(
+      "scroll",
+      () => {
+        this.draw();
+        this.onNavigation();
+      },
+      { passive: true },
+    );
     parent.addEventListener("pointerdown", (event) => {
       const rect = parent.getBoundingClientRect();
       if (event.clientY >= rect.top + parent.clientHeight)
@@ -383,11 +403,20 @@ export class Arrangement {
           top + 20,
         );
       } else if (
-        track.kind !== "pitched" &&
-        (this.densityMode || track.kind === "group")
+        track.overview?.length ||
+        (track.kind !== "pitched" &&
+          (this.densityMode || track.kind === "group"))
       ) {
         const center = top + track.height / 2;
-        for (const bin of hitDensity(track, this.scale, start, end)) {
+        const bins = track.overview?.length
+          ? track.overview.map((bin: any) => ({
+              beat: bin.start_tick / track.ppq,
+              count: bin.notes,
+              velocity: bin.notes * 0.65,
+            }))
+          : hitDensity(track, this.scale, start, end);
+        for (const bin of bins) {
+          if (!bin.count) continue;
           const h = 3 + 17 * (1 - Math.exp(-bin.count / 3));
           c.globalAlpha = 0.25 + (0.7 * bin.velocity) / bin.count;
           c.fillStyle = color("#fff");
@@ -442,7 +471,13 @@ export class Arrangement {
       } else if (track.kind === "pitched") {
         c.fillText(track.id, 12, top + 24);
         c.fillStyle = color("#747474");
-        c.fillText(`${track.notes.length} notes`, 12, top + 40);
+        c.fillText(
+          track.overview?.length
+            ? `${track.overview.reduce((sum: number, bin: any) => sum + bin.notes, 0)} visible notes`
+            : `${track.notes.length} notes`,
+          12,
+          top + 40,
+        );
       }
       c.restore();
     }

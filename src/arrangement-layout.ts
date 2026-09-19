@@ -5,6 +5,7 @@ export type ArrangementRow = {
   group?: string;
   members?: string[];
   notes: any[];
+  overview?: any[];
   ppq: number;
   min: number;
   max: number;
@@ -34,7 +35,8 @@ export function arrangementRows(
           label: t.track,
           kind: "pitched",
           notes,
-          ppq: t.ppq ?? 960,
+          overview: t.overview,
+          ppq: t.ppq ?? 960_000,
           min: notes.reduce(
             (n: number, note: any) => Math.min(n, note.key),
             48,
@@ -88,6 +90,13 @@ export function arrangementRows(
           ...n,
           start_tick: n.start_tick / t.ppq,
           duration_ticks: n.duration_ticks / t.ppq,
+        })),
+      ),
+      overview: members.flatMap((t) =>
+        (t.overview ?? []).map((bin) => ({
+          ...bin,
+          start_tick: bin.start_tick / t.ppq,
+          end_tick: bin.end_tick / t.ppq,
         })),
       ),
       ppq: 1,

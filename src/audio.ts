@@ -3,7 +3,19 @@ export class AudioPlayer {
   analyser?: AnalyserNode;
   node?: AudioWorkletNode;
   worker?: Worker;
-  pending?: Worker;
+  nextRequest = 0;
+  revision = 0;
+  private loaded = false;
+  private acceptance = 0;
+  committing = false;
+  private requests = new Map<
+    number,
+    {
+      resolve: (v: any) => void;
+      reject: (e: Error) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }
+  >();
   playing = false;
   beat = 0;
   epoch = 0;
@@ -51,53 +63,29 @@ export class AudioPlayer {
     this.node = node;
     this.analyser = analyser;
   }
-  async accept(snapshot: any, isCurrent: () => boolean) {
-    await this.init();
+  private createWorker() {
     const worker = new Worker(new URL("./render.worker.ts", import.meta.url), {
       type: "module",
     });
-    this.pending?.terminate();
-    this.pending = worker;
-    const status = await new Promise<any>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        worker.terminate();
-        reject(new Error("Audio preparation exceeded 30 seconds"));
-      }, 30000);
-      worker.onerror = (event) => {
-        clearTimeout(timer);
-        worker.terminate();
-        reject(new Error(event.message));
-      };
-      worker.onmessage = ({ data }) => {
-        if (data.type === "ready") {
-          clearTimeout(timer);
-          resolve(data.status);
-        }
-        if (data.type === "error") {
-          clearTimeout(timer);
-          worker.terminate();
-          reject(
+    worker.onmessage = ({ data }) => {
+      if (data.type === "fatal") {
+        this.dispose();
+        this.onError(data.error);
+        return;
+      }
+      const request = this.requests.get(data.id);
+      if (request) {
+        clearTimeout(request.timer);
+        this.requests.delete(data.id);
+        if (data.error)
+          request.reject(
             Object.assign(new Error(data.error.message), {
               diagnostic: data.error,
             }),
           );
-        }
-      };
-      worker.postMessage({
-        type: "load",
-        snapshot,
-        rate: this.context!.sampleRate,
-      });
-    });
-    if (!isCurrent()) {
-      worker.terminate();
-      return null;
-    }
-    this.worker?.terminate();
-    if (this.loop && this.loop[1] > status.endBeat) this.loop = null;
-    this.worker = worker;
-    this.pending = undefined;
-    worker.onmessage = ({ data }) => {
+        else request.resolve(data.value);
+        return;
+      }
       if (data.type === "error") {
         this.pause();
         this.onError(data.error);
@@ -108,8 +96,10 @@ export class AudioPlayer {
       }
     };
     worker.onerror = (event) => {
-      this.pause();
-      this.onError({ message: event.message });
+      this.dispose();
+      this.onError({
+        message: `Rendering worker failed; playback continuity was lost. ${event.message}`,
+      });
     };
     const channel = new MessageChannel();
     this.node!.port.postMessage({ type: "connect", port: channel.port1 }, [
@@ -118,8 +108,83 @@ export class AudioPlayer {
     worker.postMessage({ type: "connect", port: channel.port2 }, [
       channel.port2,
     ]);
+    this.worker = worker;
     this.selectAnalysis(this.analysisSource);
-    this.seek(Math.min(this.beat, Math.max(0, status.endBeat - 0.001)));
+  }
+  private call(message: any): Promise<any> {
+    const id = ++this.nextRequest;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.requests.delete(id);
+        this.worker?.postMessage({ type: "discard", request: message.request });
+        reject(
+          new Error(
+            message.type === "apply"
+              ? "Audio apply response exceeded 30 seconds; reload before assuming which revision is active"
+              : "Audio preparation exceeded 30 seconds; the accepted revision is retained",
+          ),
+        );
+      }, 30000);
+      this.requests.set(id, { resolve, reject, timer });
+      this.worker!.postMessage({ ...message, id });
+    });
+  }
+  cancelPending() {
+    this.acceptance++;
+    this.worker?.postMessage({ type: "discard", request: this.acceptance - 1 });
+  }
+  dispose() {
+    this.cancelPending();
+    this.pause();
+    this.worker?.terminate();
+    this.worker = undefined;
+    this.revision = 0;
+    this.loaded = false;
+    for (const request of this.requests.values()) {
+      clearTimeout(request.timer);
+      request.reject(new Error("Cancelled"));
+    }
+    this.requests.clear();
+  }
+  async accept(
+    snapshot: any,
+    isCurrent: () => boolean,
+    assets: any[] = [],
+    onCommit?: () => void,
+  ) {
+    await this.init();
+    if (!isCurrent()) return null;
+    const initial = !this.loaded;
+    if (!this.worker) this.createWorker();
+    const request = ++this.acceptance;
+    await this.call({
+      type: "prepare",
+      request,
+      snapshot,
+      assets,
+      rate: this.context!.sampleRate,
+      base_revision: this.revision,
+    });
+    if (!isCurrent() || request !== this.acceptance) {
+      this.worker?.postMessage({ type: "discard", request });
+      return null;
+    }
+    this.committing = true;
+    onCommit?.();
+    let status;
+    try {
+      status = await this.call({ type: "apply", request });
+    } finally {
+      this.committing = false;
+    }
+    this.revision = status.revision;
+    this.loaded = true;
+    if (this.loop && this.loop[1] > status.endBeat) {
+      this.loop = null;
+      this.worker?.postMessage({ type: "loop", range: null });
+    }
+    if (initial)
+      this.seek(Math.min(this.beat, Math.max(0, status.endBeat - 0.001)));
     return status;
   }
   async play() {
@@ -207,11 +272,14 @@ export class Compiler {
   }
   reset(reason = "Cancelled") {
     this.worker.terminate();
+    this.cancel(reason);
+    this.worker = this.create();
+  }
+  cancel(reason = "Cancelled") {
     for (const request of this.requests.values()) {
       clearTimeout(request.timer);
       request.reject(new Error(reason));
     }
     this.requests.clear();
-    this.worker = this.create();
   }
 }

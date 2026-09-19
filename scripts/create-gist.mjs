@@ -1,7 +1,9 @@
 // Explicit publishing command; normal builds and deployments never create gists.
 import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
+import { readdir } from "node:fs/promises";
 import { sources } from "./catalog.mjs";
+import { assertSourceOnlyShareable, isAssetPath } from "../src/assets.js";
 const [directory, entry = "song.muz", title = "muz project"] =
   process.argv.slice(2);
 if (!directory)
@@ -9,6 +11,25 @@ if (!directory)
     "Usage: node scripts/create-gist.mjs DIRECTORY [ENTRY] [TITLE]",
   );
 const source = await sources(resolve(directory));
+async function assetPaths(dir, prefix = "") {
+  const found = {};
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    if (
+      entry.name.startsWith(".") ||
+      ["out", "target", "dist", "node_modules"].includes(entry.name)
+    )
+      continue;
+    const path = prefix + entry.name;
+    if (entry.isDirectory())
+      Object.assign(
+        found,
+        await assetPaths(resolve(dir, entry.name), path + "/"),
+      );
+    else if (entry.isFile() && isAssetPath(path)) found[path] = true;
+  }
+  return found;
+}
+assertSourceOnlyShareable(await assetPaths(resolve(directory)));
 if (!source[entry]) throw new Error(`Missing entry ${entry}`);
 const files = {},
   paths = {};

@@ -5,6 +5,8 @@ class MuzPlayer extends AudioWorkletProcessor {
     this.queue = [];
     this.offset = 0;
     this.epoch = 0;
+    this.acceptedRevision = 0;
+    this.fadeRevision = null;
     this.playing = false;
     this.framesSinceReport = 0;
     this.underruns = 0;
@@ -29,12 +31,23 @@ class MuzPlayer extends AudioWorkletProcessor {
     };
   }
   receive(data) {
-    if (data.type === "reset") {
+    if (data.type === "revision" && data.epoch === this.epoch) {
+      this.acceptedRevision = data.revision;
+      // When paused/full, do not synthesize uncredited transition blocks. Fade
+      // the queued boundary and first new block without discarding held state.
+      if (data.queuedFade) {
+        const last = this.queue.at(-1);
+        if (last) last.fadeOut = true;
+        this.fadeRevision = data.revision;
+      }
+    } else if (data.type === "reset") {
       for (const item of this.queue) this.recycle(item, false);
       this.queue = [];
       this.offset = 0;
       this.epoch = data.epoch;
       this.status = data.status;
+      this.acceptedRevision = data.status.revision ?? 0;
+      this.fadeRevision = null;
       this.gain = 0;
       this.primed = false;
       this.underruns = 0;
@@ -49,7 +62,16 @@ class MuzPlayer extends AudioWorkletProcessor {
     } else if (data.type === "audio") {
       if (data.epoch !== this.epoch || this.queue.length >= 32)
         this.recycle(data, false);
-      else this.queue.push(data);
+      else {
+        if (
+          this.fadeRevision !== null &&
+          data.meta.status.revision >= this.fadeRevision
+        ) {
+          data.fadeIn = true;
+          this.fadeRevision = null;
+        }
+        this.queue.push(data);
+      }
     }
   }
   recycle(item, credit = true) {
@@ -87,13 +109,16 @@ class MuzPlayer extends AudioWorkletProcessor {
       }
       this.starved = false;
       this.gain = Math.min(1, this.gain + 1 / (sampleRate * 0.005));
-      left[i] = item.audio[this.offset * 2] * this.gain;
-      right[i] = item.audio[this.offset * 2 + 1] * this.gain;
+      const phase = this.offset / Math.max(1, item.meta.frames - 1);
+      const gain =
+        this.gain * (item.fadeOut ? 1 - phase : 1) * (item.fadeIn ? phase : 1);
+      left[i] = item.audio[this.offset * 2] * gain;
+      right[i] = item.audio[this.offset * 2 + 1] * gain;
       const monitor = outputs[1];
       if (monitor && item.analysis === this.analysis) {
         const start = item.meta.frames * 2;
-        monitor[0][i] = item.audio[start + this.offset * 2] * this.gain;
-        monitor[1][i] = item.audio[start + this.offset * 2 + 1] * this.gain;
+        monitor[0][i] = item.audio[start + this.offset * 2] * gain;
+        monitor[1][i] = item.audio[start + this.offset * 2 + 1] * gain;
       }
       this.offset++;
       const end = item.meta.status;
@@ -116,7 +141,7 @@ class MuzPlayer extends AudioWorkletProcessor {
         this.offset = 0;
         this.status = { ...end, meters: item.meta.meters };
         this.recycle(item);
-        if (end.done) {
+        if (end.done && (end.revision ?? 0) >= this.acceptedRevision) {
           this.playing = false;
           this.port.postMessage({
             type: "ended",

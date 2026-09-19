@@ -1,5 +1,13 @@
 import { createEngine } from "./engine.js";
 let engine: Awaited<ReturnType<typeof createEngine>>;
+const ready = fetch(new URL("../public/muz.wasm", import.meta.url))
+  .then((r) => {
+    if (!r.ok) throw new Error("Build the WASM engine first");
+    return r.arrayBuffer();
+  })
+  .then(createEngine)
+  .then((value) => (engine = value));
+void ready.catch(() => {});
 let port: MessagePort | undefined;
 let epoch = 0,
   credits = 0,
@@ -7,75 +15,146 @@ let epoch = 0,
   done = false;
 const pool: ArrayBuffer[] = [];
 let analysis: string | null = null;
+let initialized = false;
+let pending: any;
+function emitAudio(fadeOut = false) {
+  const meta = engine.call({
+    command: "render",
+    frames: 1024,
+    analysis,
+    fade_out: fadeOut,
+  });
+  const audio = new Float32Array(pool.pop() ?? new ArrayBuffer(16384));
+  engine.audio(1024, audio.subarray(0, 2048));
+  engine.audio(1024, audio.subarray(2048), true);
+  port!.postMessage(
+    {
+      type: "audio",
+      epoch,
+      revision: meta.status.revision,
+      audio,
+      meta,
+      analysis,
+    },
+    [audio.buffer],
+  );
+  credits = Math.max(0, credits - 1);
+  done = meta.status.done;
+}
 function pump() {
-  if (scheduled || !credits || done || !port) return;
+  if (scheduled || !credits || done || !port || !initialized) return;
   scheduled = true;
   setTimeout(() => {
     scheduled = false;
-    if (!credits || done || !port) return;
+    if (!credits || done || !port || !initialized) return;
     try {
       const started = performance.now();
-      const meta = engine.call({ command: "render", frames: 1024, analysis });
-      const audio = new Float32Array(pool.pop() ?? new ArrayBuffer(16384));
-      engine.audio(1024, audio.subarray(0, 2048));
-      engine.audio(1024, audio.subarray(2048), true);
-      port.postMessage({ type: "audio", epoch, audio, meta, analysis }, [
-        audio.buffer,
-      ]);
-      credits--;
-      done = meta.status.done;
+      emitAudio();
       self.postMessage({ type: "cost", ms: performance.now() - started });
       pump();
     } catch (e: any) {
       done = true;
-      self.postMessage({
-        type: "error",
-        error: e.diagnostic ?? { message: e.message },
-      });
+      const error = e.diagnostic ?? { message: e.message };
+      if (e instanceof WebAssembly.RuntimeError)
+        self.postMessage({
+          type: "fatal",
+          error: {
+            message: `Rendering engine failed; playback continuity was lost. ${error.message}`,
+          },
+        });
+      else self.postMessage({ type: "error", error });
     }
   }, 0);
 }
-self.onmessage = async ({ data }) => {
-  try {
-    if (data.type === "load") {
-      engine = await createEngine(
-        await (
-          await fetch(new URL("../public/muz.wasm", import.meta.url))
-        ).arrayBuffer(),
-      );
-      const status = engine.call({
-        command: "load",
-        snapshot: data.snapshot,
-        rate: data.rate,
-      });
-      self.postMessage({ type: "ready", status });
-    } else if (data.type === "analysis") {
-      analysis = data.id;
-    } else if (data.type === "connect") {
-      port = data.port;
-      port!.onmessage = ({ data }) => {
-        if (data.buffer && pool.length < 32) pool.push(data.buffer);
-        if (data.type === "credit" && data.epoch === epoch) {
-          credits++;
-          pump();
-        }
-      };
-    } else if (data.type === "seek") {
-      epoch = data.epoch;
-      engine.call({ command: "loop", range: data.range });
-      engine.call({ command: "seek", beat: data.beat });
-      // Apply loop after seeking so an out-of-range seek starts at the loop's beginning.
-      const status = engine.call({ command: "loop", range: data.range });
-      credits = 24;
-      done = false;
-      port!.postMessage({ type: "reset", epoch, status });
-      self.postMessage({ type: "seeked", epoch, status });
-      pump();
-    }
-  } catch (e: any) {
-    self.postMessage({
-      type: "error",
-      error: e.diagnostic ?? { message: e.message },
-    });
+let commands = Promise.resolve();
+self.onmessage = ({ data }) => {
+  if (data.type === "connect") {
+    port = data.port;
+    port!.onmessage = ({ data }) => {
+      if (data.buffer && pool.length < 32) pool.push(data.buffer);
+      if (data.type === "credit" && data.epoch === epoch) {
+        credits = Math.min(24, credits + 1);
+        pump();
+      }
+    };
+    return;
   }
+  commands = commands.then(async () => {
+    try {
+      await ready;
+      let value: any;
+      if (data.type === "prepare") {
+        pending = undefined;
+        engine.call({ command: "discard" });
+        engine.call({ command: "assets", entries: data.assets ?? [] });
+        pending = engine.call({
+          command: "prepare",
+          snapshot: data.snapshot,
+          rate: data.rate,
+          request: data.request,
+          base_revision: data.base_revision,
+        });
+        value = pending;
+      } else if (data.type === "apply") {
+        if (!pending || pending.request !== data.request)
+          throw new Error("Stale prepared revision");
+        if (
+          initialized &&
+          engine.call({ command: "status" }).generation !== pending.generation
+        )
+          throw new Error(
+            "Transport changed during preparation; rebuild again",
+          );
+        const queuedFade = pending.needs_fade && initialized && !credits;
+        if (pending.needs_fade && initialized && port && credits)
+          emitAudio(true);
+        value = engine.call({ command: "apply", request: data.request });
+        pending = undefined;
+        initialized = true;
+        done = false;
+        port?.postMessage({
+          type: "revision",
+          epoch,
+          revision: value.revision,
+          queuedFade,
+        });
+        pump();
+      } else if (data.type === "discard") {
+        const matches =
+          data.request === undefined || pending?.request === data.request;
+        if (matches) {
+          engine.call({ command: "discard" });
+          pending = undefined;
+        }
+        value = { discarded: matches };
+      } else if (data.type === "analysis") {
+        analysis = data.id;
+      } else if (data.type === "loop" && initialized) {
+        value = engine.call({ command: "loop", range: data.range });
+      } else if (data.type === "seek" && initialized) {
+        epoch = data.epoch;
+        engine.call({ command: "loop", range: data.range });
+        engine.call({ command: "seek", beat: data.beat });
+        // Apply loop after seeking so an out-of-range seek starts at the loop's beginning.
+        const status = engine.call({ command: "loop", range: data.range });
+        credits = 24;
+        done = false;
+        port!.postMessage({ type: "reset", epoch, status });
+        self.postMessage({ type: "seeked", epoch, status });
+        pump();
+      }
+      if (data.id !== undefined) self.postMessage({ id: data.id, value });
+    } catch (e: any) {
+      const error = e.diagnostic ?? { message: e.message };
+      if (e instanceof WebAssembly.RuntimeError)
+        self.postMessage({
+          type: "fatal",
+          error: {
+            message: `Rendering engine failed; playback continuity was lost. ${error.message}`,
+          },
+        });
+      else if (data.id !== undefined) self.postMessage({ id: data.id, error });
+      else self.postMessage({ type: "error", error });
+    }
+  });
 };

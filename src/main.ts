@@ -5,10 +5,28 @@ import { AudioPlayer, Compiler } from "./audio";
 import {
   canMountFolder,
   pickFolder,
-  readFolder,
+  readProjectFolder,
   MountedFolder,
 } from "./folder";
+import {
+  ASSET_LIMITS,
+  assetTransfers,
+  importArchiveEntries,
+  isAssetPath,
+  projectArchiveEntries,
+  verifiedAssetTransfers,
+} from "./assets.js";
 import { SourceEditor } from "./editor";
+import {
+  hasStoredProject,
+  loadStoredProject,
+  saveStoredProject,
+} from "./project-storage.js";
+import {
+  InspectionClient,
+  graphFromRows,
+  performanceFromRows,
+} from "./inspection";
 import { renderDocument, revealDocumentAnchor } from "./document";
 import { enableGraphPanning } from "./pan";
 import {
@@ -21,13 +39,22 @@ import {
   automationView,
   automationValue,
 } from "./views";
-import { zipSync, unzipSync, strToU8, strFromU8 } from "fflate";
+import { zipSync, unzipSync } from "fflate";
 
 type Project = {
   id: string;
   title: string;
   entry: string;
   files: Record<string, string>;
+  assets?: Record<
+    string,
+    {
+      format: "midi" | "wav" | "flac";
+      version: string;
+      byteLength: number;
+      base64: string;
+    }
+  >;
   entries?: string[];
   description?: string;
   gist?: string;
@@ -54,7 +81,14 @@ let views: any,
   status: any,
   selected = "",
   view = "arrangement",
-  busy = false;
+  busy = false,
+  commitInProgress = false;
+let inspection: InspectionClient | undefined;
+let arrangementInspectionTimer: ReturnType<typeof setTimeout>;
+let arrangementInspectionToken = 0;
+let viewRenderToken = 0;
+let explainedLocation: any;
+let explanationToken = 0;
 const entryCompiler = new Compiler();
 let validEntries = new Set<string>();
 let entryScanPending = false;
@@ -78,7 +112,7 @@ $("app").innerHTML = `
   <section class="source-pane"><div class="tabs" id="file-tabs"></div><div class="source-tools"><span id="source-path"></span><label class="entry-choice">Entrypoints <select id="entry-select" aria-label="Entrypoints" title="Choose the file to rebuild"></select></label><button id="format">Format</button><button id="set-entry">Use as entry</button></div><div id="entry-notice" role="status" hidden></div><div id="editor"></div><div id="requirements" hidden></div><div id="document" hidden></div><div class="source-foot"><span id="source-mode">muz source</span><span id="entry-label"></span></div></section>
   <div class="splitter" role="separator" tabindex="0" aria-label="Resize editor" aria-orientation="vertical"></div>
   <section class="visual-pane"><div class="view-tabs" role="tablist" aria-label="Inspection views"><button data-view="arrangement" role="tab" aria-selected="true">Arrangement</button><button data-view="routing" role="tab" aria-selected="false">Routing</button><button data-view="patch" role="tab" aria-selected="false">Voice patch</button><button data-view="automation" role="tab" aria-selected="false">Automation</button></div><div class="visual-tools"><span id="view-caption">The music your code makes</span><span id="kit-legend" hidden></span></div><div class="arrangement-tools" id="arrangement-controls" role="toolbar" aria-label="Arrangement navigation"><button id="zoom-out" aria-label="Zoom out" title="Zoom out (−)">−</button><input id="zoom" type="range" min="0" max="9" step=".05" value="0" aria-label="Arrangement zoom"><button id="zoom-in" aria-label="Zoom in" title="Zoom in (+)">＋</button><output id="zoom-value">1×</output><button id="zoom-fit" title="Fit the entire arrangement (Home)">Fit</button><button id="center-playhead" title="Center the view on the playhead">Center playhead</button><button id="follow" aria-pressed="true" title="Keep the playhead visible during playback; manual panning turns this off">Follow</button></div><div class="view-content"><div id="arrangement"></div><div id="graph-view" hidden></div></div><div class="selection-heading"><button id="toggle-inspector" aria-expanded="true" aria-controls="inspector" title="Show or hide inspector">Inspector ▾</button><span id="selection-label">Inspector</span><button id="jump-source" disabled>Open related source ↗</button></div><div id="inspector"><p class="empty">Select a track or note to inspect its performance and sound.</p></div><div class="analysis-heading"><label>Analyze <select id="analysis-source" aria-label="Analysis output"><option value="">Master</option></select></label><span id="analysis-detail">Master output</span></div><div class="analysis-strip"><div><span>Waveform</span><canvas id="scope" width="320" height="70" aria-label="Selected output waveform"></canvas></div><div><span>Spectrum</span><canvas id="spectrum" width="320" height="70" aria-label="Selected output spectrum"></canvas></div></div></section></main>
-  <footer class="diagnostics"><div class="diagnostics-heading"><span id="build-state">Starting</span><span id="build-detail">Loading muz-core</span><span id="audio-health"></span></div><div id="diagnostic-list" role="status" aria-live="polite"></div></footer>
+  <footer class="diagnostics"><div class="diagnostics-heading"><span id="build-state">Starting</span><span id="build-detail">Loading muz-core</span><span id="audio-health"></span><details id="revision-effects"><summary>Revision details</summary><div id="revision-effect-list"></div></details></div><div id="diagnostic-list" role="status" aria-live="polite"></div></footer>
   <input id="folder-input" type="file" webkitdirectory multiple hidden><input id="zip-input" type="file" accept=".zip" hidden>
   <dialog id="gist-dialog"><form id="gist-form"><h2>Import from gist</h2><label>Gist URL or ID<input id="gist-input" required autocomplete="off" spellcheck="false" placeholder="https://gist.github.com/…"></label><p>Open a local working copy. Share this page’s URL to share the gist; local edits are not included.</p><p id="gist-error" role="alert"></p><div><button type="button" id="gist-cancel">Cancel</button><button id="gist-submit" class="primary">Import</button></div></form></dialog>
   <dialog id="file-dialog"><form method="dialog"><h2>Add a source file</h2><label>Project-relative filename<input id="new-file-name" value="part.muz" required pattern="[a-zA-Z0-9_./-]+\\.muz"></label><p id="file-error"></p><div><button value="cancel">Cancel</button><button id="create-file" class="primary" value="create">Create file</button></div></form></dialog>`;
@@ -172,6 +206,15 @@ function compilationFiles() {
     ...project.files,
   };
 }
+async function workerAssetEntries() {
+  return (await verifiedAssetTransfers(project.assets)).map(
+    ({ path, version, bytes }) => ({
+      path,
+      version,
+      bytes,
+    }),
+  );
+}
 function scheduleEntryScan(delay = 600) {
   clearTimeout(entryScanTimer);
   const token = ++entryScanToken;
@@ -188,6 +231,14 @@ function scheduleEntryScan(delay = 600) {
         ...Object.keys(project.files).sort(),
       ]),
     ].filter((p) => p.endsWith(".muz") && project.files[p] !== undefined);
+    try {
+      await entryCompiler.call({
+        command: "assets",
+        entries: await workerAssetEntries(),
+      });
+    } catch {
+      // Asset validation failures are reported by the explicit build.
+    }
     for (const entry of candidates) {
       if (token !== entryScanToken) return;
       try {
@@ -225,13 +276,13 @@ $("mount-folder").hidden = !canMountFolder();
 $("mount-folder").onclick = async () => {
   try {
     const root = await pickFolder();
-    const files = await readFolder(root);
+    const { files, assets } = await readProjectFolder(root);
     const mounted = new MountedFolder(root, files);
-    importProject(files, root.name);
+    await importProject(files, root.name, { assets });
     mount = mounted;
     project.folderName = root.name;
     mountedSettings = projectDiskFiles()["muzpad.json"];
-    persistDraft();
+    await persistDraft();
     updateFolderState();
   } catch (e) {
     if ((e as Error).name !== "AbortError") error(e);
@@ -245,20 +296,20 @@ $("reload-folder").onclick = async () => {
   reloading = true;
   updateFolderState();
   try {
-    const files = await readFolder(target.root);
+    const { files, assets } = await readProjectFolder(target.root);
     if (mount !== target || project !== current) return;
     const connected = new MountedFolder(target.root, files);
-    const build = importProject(files, target.root.name, {
+    await importProject(files, target.root.name, {
       preserveRequired: true,
       preferredEntry: current.entry,
       keepSession: true,
+      assets,
     });
     mount = connected;
     project.folderName = target.root.name;
     mountedSettings = projectDiskFiles()["muzpad.json"];
-    persistDraft();
+    await persistDraft();
     updateFolderState();
-    await build;
   } catch (e) {
     if (project === current || mount?.root === target.root) error(e);
   } finally {
@@ -337,20 +388,24 @@ function updateRevision() {
     ? `Active entry: ${acceptedEntry}`
     : `Entry: ${project.entry}`;
 }
-function persistDraft() {
+async function persistDraft() {
   if (!project) return;
   try {
-    localStorage.setItem("muzpad-draft-v1", JSON.stringify(project));
+    await saveStoredProject("muzpad-draft-v1", project);
   } catch {
     message("Draft storage full", "Download your project to keep these edits");
   }
 }
 function saveDraft() {
   clearTimeout(draftTimer);
-  draftTimer = setTimeout(persistDraft, 400);
+  draftTimer = setTimeout(() => void persistDraft(), 400);
 }
-window.addEventListener("pagehide", persistDraft);
-function openProject(next: Project, rebuild = true, keepSession = false) {
+window.addEventListener("pagehide", () => void persistDraft());
+async function openProject(next: Project, rebuild = true, keepSession = false) {
+  if (keepSession && commitInProgress)
+    throw new Error(
+      "The current revision is being applied; retry reload when it finishes.",
+    );
   mount = undefined;
   mountedSettings = undefined;
   if (!keepSession) {
@@ -358,12 +413,21 @@ function openProject(next: Project, rebuild = true, keepSession = false) {
     player.loop = null;
     $("loop").setAttribute("aria-pressed", "false");
   }
-  runToken++;
-  compiler.reset();
+  const openingToken = ++runToken;
+  commitInProgress = false;
+  if (keepSession) {
+    compiler.cancel();
+    player.cancelPending();
+  } else {
+    compiler.reset();
+    inspection = undefined;
+  }
   busy = false;
   $("run").removeAttribute("disabled");
   $("cancel").hidden = true;
   project = structuredClone(next);
+  project.assets ??= {};
+  assetTransfers(project.assets);
   gistRequest?.abort();
   gistRequest = undefined;
   $("download").hidden = !!project.gist;
@@ -398,8 +462,7 @@ function openProject(next: Project, rebuild = true, keepSession = false) {
     player.selectAnalysis(null);
     $("analysis-source").innerHTML = '<option value="">Master</option>';
     $("analysis-detail").textContent = "Master output";
-    player.worker?.terminate();
-    player.worker = undefined;
+    player.dispose();
     $("play").setAttribute("disabled", "");
     $("stop").setAttribute("disabled", "");
     $("section").innerHTML = '<option value="">Sections</option>';
@@ -419,9 +482,12 @@ function openProject(next: Project, rebuild = true, keepSession = false) {
   else openFile(project.entry);
   updateRevision();
   showView();
-  persistDraft();
+  // Finish the initial save before exposing a completed project switch. Asset
+  // projects do not publish their IndexedDB marker until both records commit.
+  await persistDraft();
+  if (openingToken !== runToken) return;
   message("Ready to rebuild", "Edit the source, then Rebuild to hear it");
-  return rebuild ? run() : Promise.resolve();
+  if (rebuild) await run();
 }
 function tree() {
   const query = $<HTMLInputElement>("file-search").value.toLowerCase();
@@ -501,18 +567,17 @@ function tree() {
         (el.onclick = () =>
           openFile(el.dataset.file!, el.dataset.kind === "library")),
     );
-  if (localStorage.getItem("muzpad-previous-v1")) {
+  if (hasStoredProject("muzpad-previous-v1")) {
     const button = document.createElement("button");
     button.className = "project-link";
     button.textContent = "↶ Previous workspace";
-    button.onclick = () => {
+    button.onclick = async () => {
       try {
-        const previous = JSON.parse(
-          localStorage.getItem("muzpad-previous-v1")!,
-        );
+        const previous = await loadStoredProject("muzpad-previous-v1");
+        if (!previous) throw new Error("Previous workspace is unavailable.");
         validateFiles(previous.files);
-        preserveProject();
-        openProject(previous);
+        await preserveProject(true);
+        await openProject(previous);
       } catch (e) {
         error(e);
       }
@@ -530,11 +595,11 @@ function tree() {
       };
     });
 }
-function preserveProject(required = false, previous = project) {
+async function preserveProject(required = false, previous = project) {
   // Keep the previous workspace recoverable when switching projects without a modal.
   if (previous) {
     try {
-      localStorage.setItem("muzpad-previous-v1", JSON.stringify(previous));
+      await saveStoredProject("muzpad-previous-v1", previous);
     } catch {
       if (required)
         throw new Error(
@@ -624,7 +689,205 @@ function jump(location: any) {
   editor.jump(location.line, location.column);
 }
 function jumpId(id: string) {
-  jump(views?.locations[id]);
+  const cached = views?.locations[id];
+  if (cached) jump(cached);
+  else if (inspection) {
+    const current = inspection;
+    void current
+      .location(id)
+      .then((location) => {
+        if (inspection === current) jump(location);
+      })
+      .catch(error);
+  }
+}
+async function refreshArrangement() {
+  if (!inspection || !views || !status) return;
+  const current = inspection;
+  const requestToken = ++arrangementInspectionToken;
+  const range = arrangement.visibleRange();
+  try {
+    const ids = arrangement.visibleTrackIds();
+    const tracks = ids.length
+      ? views.graph.tracks.filter((track: any) => ids.includes(track.id))
+      : views.graph.tracks.slice(0, 12);
+    const overview = arrangement.densityMode;
+    const pages = await Promise.all(
+      tracks.map(async (track: any) => {
+        const ppq = track.source?.summary?.ppq ?? 960_000;
+        const start_tick = Math.floor(range.start * ppq);
+        const request = {
+          track: track.id,
+          start_tick,
+          end_tick: Math.max(start_tick + 1, Math.ceil(range.end * ppq)),
+        };
+        let page = await current.inspect(
+          overview ? "performance_overview" : "performance",
+          request,
+        );
+        let trackOverview = overview;
+        if (!overview && page.next != null) {
+          page = await current.inspect("performance_overview", request);
+          trackOverview = true;
+        }
+        return { track, ppq, page, overview: trackOverview };
+      }),
+    );
+    if (inspection !== current || requestToken !== arrangementInspectionToken)
+      return;
+    // Keep detail only for the current visible request. Scrolling releases old
+    // note/overview rows instead of accumulating a whole performance in the UI.
+    const prior = new Map<string, any>();
+    for (const { track, ppq, page, overview: trackOverview } of pages) {
+      const performed = performanceFromRows(page.rows)[0];
+      prior.set(track.id, {
+        track: track.id,
+        ppq,
+        notes: trackOverview ? [] : (performed?.notes ?? []),
+        overview: trackOverview ? page.rows : [],
+        next: page.next,
+      });
+    }
+    views.performance = views.graph.tracks.map(
+      (track: any) =>
+        prior.get(track.id) ?? {
+          track: track.id,
+          ppq: track.source?.summary?.ppq ?? 960_000,
+          notes: [],
+        },
+    );
+    arrangement.views = views;
+    arrangement.layout();
+    arrangement.draw();
+    arrangement.parent.dataset.inspectionState = pages.some(
+      (page) => page.overview,
+    )
+      ? "overview"
+      : "detail";
+  } catch (e) {
+    if (inspection === current) error(e);
+  }
+}
+function scheduleArrangementInspection() {
+  clearTimeout(arrangementInspectionTimer);
+  arrangement.parent.dataset.inspectionState = "loading";
+  arrangementInspectionTimer = setTimeout(() => void refreshArrangement(), 100);
+}
+function renderRevisionEffect(effect: any, revision: number) {
+  const target = $("revision-effect-list");
+  target.innerHTML = `<p>Revision ${revision} · ${esc(
+    typeof effect === "string" ? effect : JSON.stringify(effect ?? "accepted"),
+  )}</p>${effect == null ? '<p class="empty">This is the first accepted revision.</p>' : '<label>Difference <select id="diff-category"><option>notes</option><option>occurrences</option><option>metadata</option><option>controllers</option><option>messages</option><option>tempos</option><option>performed</option><option>consequences</option></select></label><div id="diff-page"></div>'}`;
+  if (effect == null) return;
+  const select = $<HTMLSelectElement>("diff-category");
+  const history: number[] = [];
+  let requestToken = 0;
+  const load = async (offset = 0) => {
+    if (!inspection) return;
+    const current = inspection;
+    const category = select.value;
+    const token = ++requestToken;
+    try {
+      const result = await current.diff(category, offset, 100);
+      if (
+        inspection !== current ||
+        token !== requestToken ||
+        select.value !== category ||
+        document.getElementById("diff-category") !== select
+      )
+        return;
+      const page = result.page ?? result;
+      $("diff-page").innerHTML =
+        `<pre>${esc(JSON.stringify(page.rows, null, 2))}</pre>` +
+        `<div class="bounded-pages">${history.length ? '<button id="diff-previous">Previous page</button>' : ""}${page.next != null ? `<button id="diff-more">Load next ${esc(category)} page</button>` : ""}</div>`;
+      document
+        .getElementById("diff-previous")
+        ?.addEventListener("click", () => {
+          const previous = history.pop();
+          if (previous != null) void load(previous);
+        });
+      document.getElementById("diff-more")?.addEventListener("click", () => {
+        history.push(offset);
+        void load(page.next);
+      });
+    } catch (e) {
+      if (
+        inspection === current &&
+        token === requestToken &&
+        select.value === category &&
+        document.getElementById("diff-category") === select
+      )
+        error(e);
+    }
+  };
+  select.onchange = () => {
+    history.length = 0;
+    void load();
+  };
+  void load();
+}
+function attachInitialPageControls() {
+  if (!inspection || !views) return;
+  const host = $("revision-effect-list");
+  const current = inspection;
+  for (const name of ["sections", "track_groups", "locations", "diagnostics"]) {
+    if (views.continuations?.[name] == null) continue;
+    const controls = document.createElement("div");
+    controls.className = "bounded-pages";
+    const history: number[] = [];
+    let offset = 0;
+    let next = views.continuations[name];
+    const apply = (page: any) => {
+      if (inspection !== current) return;
+      next = page.next;
+      if (name === "sections") views.graph.extras.sections = page.rows;
+      if (name === "track_groups") views.graph.extras.track_groups = page.rows;
+      if (name === "locations")
+        views.locations = Object.fromEntries(
+          page.rows.map((row: any) => [row.key, row.location]),
+        );
+      if (name === "diagnostics") views.diagnostics = page.rows;
+      if (name === "sections")
+        $("section").innerHTML =
+          '<option value="">Sections</option>' +
+          page.rows
+            .map(
+              (section: any, i: number) =>
+                `<option value="${i}">${esc(section.name.replaceAll("_", " "))}</option>`,
+            )
+            .join("");
+      arrangement.layout();
+      arrangement.draw();
+      render();
+    };
+    const load = async (nextOffset: number) => {
+      offset = nextOffset;
+      apply(await current.inspect(name, { offset }));
+    };
+    const render = () => {
+      controls.replaceChildren();
+      if (history.length) {
+        const previous = document.createElement("button");
+        previous.textContent = `Previous ${name.replaceAll("_", " ")} page`;
+        previous.onclick = () => {
+          const previousOffset = history.pop();
+          if (previousOffset != null) void load(previousOffset);
+        };
+        controls.append(previous);
+      }
+      if (next != null) {
+        const more = document.createElement("button");
+        more.textContent = `Next ${name.replaceAll("_", " ")} page`;
+        more.onclick = () => {
+          history.push(offset);
+          void load(next!);
+        };
+        controls.append(more);
+      }
+    };
+    render();
+    host.append(controls);
+  }
 }
 async function run() {
   if (busy || !project) return;
@@ -638,19 +901,72 @@ async function run() {
   message("Compiling", project.entry);
   try {
     const files = compilationFiles();
+    const assetEntries = await workerAssetEntries();
+    await compiler.call({ command: "assets", entries: assetEntries });
+    if (token !== runToken) return;
     const result = await compiler.call({
       command: "compile",
       files,
       entry: sourceEntry,
     });
     if (token !== runToken) return;
+    const candidateInspection = new InspectionClient(compiler, result.revision);
+    const [
+      summaryPage,
+      graphPage,
+      sectionsPage,
+      groupsPage,
+      locationsPage,
+      diagnosticsPage,
+    ] = await Promise.all([
+      candidateInspection.inspect("summary", { limit: 1 }),
+      candidateInspection.inspect("graph"),
+      candidateInspection.inspect("sections"),
+      candidateInspection.inspect("track_groups"),
+      candidateInspection.inspect("locations"),
+      candidateInspection.inspect("diagnostics"),
+    ]);
+    if (token !== runToken) return;
+    const candidateViews = {
+      summary: summaryPage.rows[0],
+      graph: graphFromRows(graphPage.rows, sectionsPage.rows, groupsPage.rows),
+      performance: graphPage.rows
+        .filter((row: any) => row.kind === "track")
+        .map((row: any) => ({
+          track: row.id,
+          ppq: row.detail.source?.summary?.ppq ?? 960_000,
+          notes: [],
+        })),
+      locations: Object.fromEntries(
+        locationsPage.rows.map((row: any) => [row.key, row.location]),
+      ),
+      diagnostics: diagnosticsPage.rows,
+      continuations: {
+        graph: graphPage.next,
+        sections: sectionsPage.next,
+        track_groups: groupsPage.next,
+        locations: locationsPage.next,
+        diagnostics: diagnosticsPage.next,
+      },
+    };
     message("Preparing audio", "Building native instruments and effects");
     const nextStatus = await player.accept(
       result.snapshot,
       () => token === runToken,
+      assetEntries,
+      () => {
+        commitInProgress = true;
+        $("cancel").hidden = true;
+      },
     );
     if (!nextStatus || token !== runToken) return;
-    views = result.views;
+    await compiler.call({
+      command: "accept_compilation",
+      revision: result.revision,
+    });
+    if (token !== runToken) return;
+    inspection = candidateInspection;
+    views = candidateViews;
     status = nextStatus;
     accepted = sourceRevision;
     acceptedEntry = sourceEntry;
@@ -669,6 +985,7 @@ async function run() {
         )
         .join("");
     arrangement.set(views, status.endBeat);
+    await refreshArrangement();
     selected = views.graph.tracks.some((t: any) => t.id === selected)
       ? selected
       : views.graph.tracks[0]?.id;
@@ -693,10 +1010,13 @@ async function run() {
           `<p>${esc(d.severity)} · ${esc(d.track)} · beat ${d.beat}: ${esc(d.message)}</p>`,
       )
       .join("");
+    renderRevisionEffect(result.effect, result.revision);
+    attachInitialPageControls();
   } catch (e: any) {
     if (token === runToken && e.message !== "Cancelled") error(e);
   } finally {
     if (token === runToken) {
+      commitInProgress = false;
       busy = false;
       $("run").removeAttribute("disabled");
       $("cancel").hidden = true;
@@ -723,6 +1043,8 @@ function selectTrack(id: string, note?: any) {
       ? `${group.id} · ${member.label} hit`
       : `${id} · ${pitch(note.key)}`
     : id;
+  explainedLocation = undefined;
+  const explainToken = ++explanationToken;
   $("jump-source").toggleAttribute("disabled", !views.locations[`track.${id}`]);
   const rows: [string, unknown][] = note
     ? [
@@ -733,10 +1055,13 @@ function selectTrack(id: string, note?: any) {
             ] as [string, unknown][])
           : []),
         ["Pitch", pitch(note.key)],
-        ["Start beat", (note.start_tick / (performance.ppq ?? 960)).toFixed(3)],
+        [
+          "Start beat",
+          (note.start_tick / (performance?.ppq ?? 960_000)).toFixed(3),
+        ],
         [
           "Duration",
-          `${(note.duration_ticks / (performance.ppq ?? 960)).toFixed(3)} beats`,
+          `${(note.duration_ticks / (performance?.ppq ?? 960_000)).toFixed(3)} beats`,
         ],
         ["Velocity", note.attack_velocity],
         ["Tags", note.tags?.join(", ") || "—"],
@@ -754,7 +1079,10 @@ function selectTrack(id: string, note?: any) {
           track.instrument.patch?.name ??
             track.instrument.kind.replace("builtin.", ""),
         ],
-        ["Notes", performance.notes?.length ?? 0],
+        [
+          "Notes",
+          track.source?.summary?.notes ?? performance?.notes?.length ?? 0,
+        ],
         ["Output", track.output.to],
         [
           "Inserts",
@@ -770,9 +1098,55 @@ function selectTrack(id: string, note?: any) {
       ];
   $("inspector").innerHTML =
     `<dl>${rows.map(([k, v]) => `<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`).join("")}</dl>`;
+  if (note && inspection && note.id) {
+    const current = inspection;
+    void current
+      .explain(id, 0, 1, note.id)
+      .then((page) => {
+        if (
+          inspection !== current ||
+          selected !== id ||
+          explainToken !== explanationToken
+        )
+          return;
+        const explanation = page.rows[0];
+        if (!explanation) return;
+        explainedLocation =
+          explanation.latest_edit ??
+          explanation.occurrences?.[0]?.location ??
+          explanation.definition;
+        $("jump-source").toggleAttribute("disabled", !explainedLocation);
+        $("inspector").insertAdjacentHTML(
+          "beforeend",
+          `<p class="provenance-quality">${esc(explanation.location_quality)}</p><div class="provenance-links"></div>`,
+        );
+        const links = $("inspector").querySelector(".provenance-links")!;
+        const destinations: [string, any][] = [
+          ["Definition", explanation.definition],
+          ["Latest relevant edit", explanation.latest_edit],
+          ...(explanation.occurrences ?? []).map(
+            (occurrence: any, i: number) => [
+              `Occurrence ${i + 1} · ${occurrence.operation}`,
+              occurrence.location,
+            ],
+          ),
+          ...Object.entries(explanation.field_edits ?? {}).map(
+            ([field, location]) => [`${field} edit`, location] as [string, any],
+          ),
+        ].filter((entry) => entry[1]);
+        for (const [label, location] of destinations) {
+          const button = document.createElement("button");
+          button.textContent = label;
+          button.onclick = () => jump(location);
+          links.append(button);
+        }
+      })
+      .catch(error);
+  }
   if (view === "patch") showView();
 }
-function showView() {
+async function showView() {
+  const renderToken = ++viewRenderToken;
   $("arrangement").hidden = view !== "arrangement";
   $("graph-view").hidden = view === "arrangement";
   $("graph-view").classList.toggle(
@@ -799,17 +1173,261 @@ function showView() {
     return;
   }
   if (view === "arrangement") arrangement.draw();
-  if (view === "routing") $("graph-view").innerHTML = routingGraph(views.graph);
-  if (view === "patch")
-    $("graph-view").innerHTML = patchGraph(
-      views.graph.tracks.find((t: any) => t.id === selected)?.instrument.patch,
-      `device.${selected}.instrument`,
-    );
-  if (view === "automation")
-    $("graph-view").innerHTML = automationView(
-      views.graph.extras.automation,
-      status.duration,
-    );
+  if (view === "routing" && inspection) {
+    const current = inspection;
+    const history: number[] = [];
+    let requestToken = 0;
+    const load = async (offset = 0) => {
+      const token = ++requestToken;
+      try {
+        const page = await current.inspect("graph", { offset });
+        if (
+          inspection !== current ||
+          view !== "routing" ||
+          token !== requestToken ||
+          renderToken !== viewRenderToken
+        )
+          return;
+        const graph = graphFromRows(
+          page.rows,
+          views.graph.extras.sections,
+          views.graph.extras.track_groups,
+        );
+        $("graph-view").innerHTML =
+          routingGraph(graph) +
+          `<div class="bounded-pages">${history.length ? '<button id="graph-previous">Previous graph page</button>' : ""}${page.next != null ? '<button id="graph-next">Next graph page</button>' : ""}<span>${offset + 1}–${offset + page.rows.length} of ${page.total}</span></div>`;
+        bindSourceHandlers();
+        document
+          .getElementById("graph-previous")
+          ?.addEventListener("click", () => {
+            const previous = history.pop();
+            if (previous != null) void load(previous);
+          });
+        document.getElementById("graph-next")?.addEventListener("click", () => {
+          history.push(offset);
+          void load(page.next!);
+        });
+      } catch (e) {
+        if (
+          inspection === current &&
+          view === "routing" &&
+          token === requestToken &&
+          renderToken === viewRenderToken
+        )
+          error(e);
+      }
+    };
+    await load();
+  }
+  if (view === "patch" && inspection) {
+    const current = inspection;
+    const selectedId = selected;
+    const history: number[] = [];
+    let requestToken = 0;
+    const load = async (offset = 0) => {
+      const token = ++requestToken;
+      try {
+        const page = await current.inspect("patch_nodes", {
+          track: selectedId,
+          offset,
+        });
+        if (
+          inspection !== current ||
+          view !== "patch" ||
+          selected !== selectedId ||
+          token !== requestToken ||
+          renderToken !== viewRenderToken
+        )
+          return;
+        const devices = new Map<string, any[]>();
+        for (const row of page.rows) {
+          const nodes = devices.get(row.device) ?? [];
+          nodes.push(row.node);
+          devices.set(row.device, nodes);
+        }
+        $("graph-view").innerHTML =
+          [...devices.entries()]
+            .map(
+              ([device, nodes]) =>
+                `<section class="patch-device"><h3>${esc(device)}</h3>${patchGraph({ nodes }, `device.${device}`)}</section>`,
+            )
+            .join("") +
+          `<div class="bounded-pages">${history.length ? '<button id="patch-previous">Previous nodes</button>' : ""}${page.next != null ? '<button id="patch-next">Next nodes</button>' : ""}<span>${offset + 1}–${offset + page.rows.length} of ${page.total}</span></div>`;
+        bindSourceHandlers();
+        document
+          .getElementById("patch-previous")
+          ?.addEventListener("click", () => {
+            const previous = history.pop();
+            if (previous != null) void load(previous);
+          });
+        document.getElementById("patch-next")?.addEventListener("click", () => {
+          history.push(offset);
+          void load(page.next!);
+        });
+      } catch (e) {
+        if (
+          inspection === current &&
+          view === "patch" &&
+          selected === selectedId &&
+          token === requestToken &&
+          renderToken === viewRenderToken
+        )
+          error(e);
+      }
+    };
+    await load();
+  }
+  if (view === "automation" && inspection) {
+    const current = inspection;
+    const history: number[] = [];
+    let requestToken = 0;
+    const load = async (offset = 0) => {
+      const token = ++requestToken;
+      try {
+        const lanes = await current.inspect("automation", {
+          offset,
+          limit: 20,
+        });
+        const pointPages = await Promise.all(
+          lanes.rows.map((lane: any) =>
+            current.inspect("automation_points", { track: lane.target }),
+          ),
+        );
+        if (
+          inspection !== current ||
+          view !== "automation" ||
+          token !== requestToken ||
+          renderToken !== viewRenderToken
+        )
+          return;
+        const models = lanes.rows
+          .map((lane: any, index: number) => ({
+            ...lane,
+            points: pointPages[index].rows.map((row: any) => row.point),
+            pointOffset: 0,
+            pointNext: pointPages[index].next,
+            pointHistory: [] as number[],
+            pointRequest: 0,
+          }))
+          .filter((lane: any) => lane.points.length);
+        const render = () => {
+          views.graph.extras.automation = models;
+          $("graph-view").innerHTML =
+            automationView(models, status.duration) +
+            models
+              .map(
+                (lane: any, index: number) =>
+                  `<div class="bounded-pages">${lane.pointOffset ? `<button data-points-previous="${index}">Previous ${esc(lane.target)} points</button>` : ""}${lane.pointNext != null ? `<button data-points-next="${index}">Next ${esc(lane.target)} points</button>` : ""}</div>`,
+              )
+              .join("") +
+            `<div class="bounded-pages">${history.length ? '<button id="automation-previous">Previous lanes</button>' : ""}${lanes.next != null ? '<button id="automation-next">Next lanes</button>' : ""}<span>${offset + 1}–${offset + lanes.rows.length} of ${lanes.total}</span></div>`;
+          bindSourceHandlers();
+          $("graph-view")
+            .querySelectorAll<HTMLButtonElement>("[data-points-next]")
+            .forEach((button) => {
+              button.onclick = async () => {
+                const index = +button.dataset.pointsNext!;
+                const lane = models[index];
+                const nextOffset = lane.pointNext;
+                const pointToken = ++lane.pointRequest;
+                try {
+                  const page = await current.inspect("automation_points", {
+                    track: lane.target,
+                    offset: nextOffset,
+                  });
+                  if (
+                    inspection !== current ||
+                    view !== "automation" ||
+                    token !== requestToken ||
+                    pointToken !== lane.pointRequest ||
+                    renderToken !== viewRenderToken
+                  )
+                    return;
+                  lane.pointHistory.push(lane.pointOffset);
+                  lane.points = page.rows.map((row: any) => row.point);
+                  lane.pointOffset = nextOffset;
+                  lane.pointNext = page.next;
+                  render();
+                } catch (e) {
+                  if (
+                    inspection === current &&
+                    view === "automation" &&
+                    token === requestToken &&
+                    pointToken === lane.pointRequest &&
+                    renderToken === viewRenderToken
+                  )
+                    error(e);
+                }
+              };
+            });
+          $("graph-view")
+            .querySelectorAll<HTMLButtonElement>("[data-points-previous]")
+            .forEach((button) => {
+              button.onclick = async () => {
+                const index = +button.dataset.pointsPrevious!;
+                const lane = models[index];
+                const nextOffset = lane.pointHistory.pop();
+                if (nextOffset == null) return;
+                const pointToken = ++lane.pointRequest;
+                try {
+                  const page = await current.inspect("automation_points", {
+                    track: lane.target,
+                    offset: nextOffset,
+                  });
+                  if (
+                    inspection !== current ||
+                    view !== "automation" ||
+                    token !== requestToken ||
+                    pointToken !== lane.pointRequest ||
+                    renderToken !== viewRenderToken
+                  )
+                    return;
+                  lane.points = page.rows.map((row: any) => row.point);
+                  lane.pointOffset = nextOffset;
+                  lane.pointNext = page.next;
+                  render();
+                } catch (e) {
+                  lane.pointHistory.push(nextOffset);
+                  if (
+                    inspection === current &&
+                    view === "automation" &&
+                    token === requestToken &&
+                    pointToken === lane.pointRequest &&
+                    renderToken === viewRenderToken
+                  )
+                    error(e);
+                }
+              };
+            });
+          document
+            .getElementById("automation-previous")
+            ?.addEventListener("click", () => {
+              const previous = history.pop();
+              if (previous != null) void load(previous);
+            });
+          document
+            .getElementById("automation-next")
+            ?.addEventListener("click", () => {
+              history.push(offset);
+              void load(lanes.next!);
+            });
+        };
+        render();
+      } catch (e) {
+        if (
+          inspection === current &&
+          view === "automation" &&
+          token === requestToken &&
+          renderToken === viewRenderToken
+        )
+          error(e);
+      }
+    };
+    await load();
+  }
+  bindSourceHandlers();
+}
+function bindSourceHandlers() {
   $("graph-view")
     .querySelectorAll<HTMLElement>("[data-source]")
     .forEach((el) => {
@@ -822,8 +1440,8 @@ function showView() {
 function download() {
   if (!project || project.gist) return;
   const archive = zipSync(
-    Object.fromEntries(
-      Object.entries({
+    projectArchiveEntries(
+      {
         ...project.files,
         "muzpad.json": JSON.stringify(
           {
@@ -834,7 +1452,8 @@ function download() {
           null,
           2,
         ),
-      }).map(([p, source]) => [p, strToU8(source)]),
+      },
+      project.assets,
     ),
   );
   const url = URL.createObjectURL(
@@ -864,17 +1483,19 @@ function validateFiles(files: Record<string, string>) {
   if (!Object.keys(files).some((p) => p.endsWith(".muz")))
     throw new Error("This folder contains no muz source files.");
 }
-function importProject(
+async function importProject(
   files: Record<string, string>,
   title: string,
   {
     preserveRequired = false,
     preferredEntry,
     keepSession = false,
+    assets = {},
   }: {
     preserveRequired?: boolean;
     preferredEntry?: string;
     keepSession?: boolean;
+    assets?: Project["assets"];
   } = {},
 ) {
   validateFiles(files);
@@ -891,7 +1512,7 @@ function importProject(
         : files["song.muz"]
           ? "song.muz"
           : Object.keys(files).find((p) => p.endsWith(".muz"))!;
-  preserveProject(preserveRequired);
+  await preserveProject(preserveRequired);
   return openProject(
     {
       id: title.replace(/[^a-z0-9-]/gi, "-"),
@@ -906,6 +1527,7 @@ function importProject(
           )
         : undefined,
       files,
+      assets,
     },
     true,
     keepSession,
@@ -922,9 +1544,10 @@ $("theme-toggle").onclick = () => {
 };
 $("run").onclick = () => void run();
 $("cancel").onclick = () => {
+  if (commitInProgress) return;
   runToken++;
-  compiler.reset();
-  player.pending?.terminate();
+  compiler.cancel();
+  player.cancelPending();
   busy = false;
   $("run").removeAttribute("disabled");
   $("cancel").hidden = true;
@@ -999,7 +1622,7 @@ async function importGist(input: string, previous = project) {
   try {
     const next = await loadGist(input, { signal: request.signal });
     if (request.signal.aborted) return;
-    preserveProject(false, previous);
+    await preserveProject(false, previous);
     await openProject(next);
   } catch (e) {
     if (!request.signal.aborted) throw e;
@@ -1036,14 +1659,19 @@ $("gist-form").onsubmit = async (event) => {
 };
 $("download").onclick = download;
 $("file-search").oninput = tree;
-$("new-project").onclick = () => {
-  preserveProject();
-  openProject({
-    id: "untitled-project",
-    title: "Untitled project",
-    entry: "song.muz",
-    files: { "song.muz": starter },
-  });
+$("new-project").onclick = async () => {
+  try {
+    message("Switching project", "Preserving the current workspace…");
+    await preserveProject(true);
+    await openProject({
+      id: "untitled-project",
+      title: "Untitled project",
+      entry: "song.muz",
+      files: { "song.muz": starter },
+    });
+  } catch (e) {
+    error(e);
+  }
 };
 $("format").onclick = async () => {
   const path = file,
@@ -1081,7 +1709,8 @@ $("entry-select").onchange = () => {
   setEntry($<HTMLSelectElement>("entry-select").value);
   openFile(project.entry);
 };
-$("jump-source").onclick = () => jumpId(`track.${selected}`);
+$("jump-source").onclick = () =>
+  explainedLocation ? jump(explainedLocation) : jumpId(`track.${selected}`);
 document.querySelectorAll<HTMLElement>("[data-view]").forEach(
   (el) =>
     (el.onclick = () => {
@@ -1108,6 +1737,7 @@ arrangement.onNavigation = () => {
   $("kit-legend").textContent = arrangement.densityMode
     ? "Kit lanes: hit density"
     : "◆ Hit · size and shade = velocity";
+  scheduleArrangementInspection();
 };
 $("zoom").oninput = () =>
   arrangement.setZoom(2 ** +$<HTMLInputElement>("zoom").value);
@@ -1144,17 +1774,29 @@ $("folder-input").onchange = async () => {
   try {
     const input = $<HTMLInputElement>("folder-input");
     const selectedFiles = Array.from(input.files ?? []);
-    const files: Record<string, string> = {};
+    message("Opening project", "Reading folder files…");
+    const entries: Record<string, Uint8Array> = {};
+    let selectedBytes = 0;
     for (const f of selectedFiles) {
       const path = f.webkitRelativePath.split("/").slice(1).join("/");
-      if (/\.(muz|md)$/.test(path) || path === "muzpad.json") {
-        if (f.size > 4_000_000) throw new Error("A source file exceeds 4 MB.");
-        files[path] = await f.text();
-      }
+      if (
+        !isAssetPath(path) &&
+        !/\.(muz|md)$/i.test(path) &&
+        path !== "muzpad.json"
+      )
+        continue;
+      if (isAssetPath(path) && f.size > ASSET_LIMITS.maxFileBytes)
+        throw new Error(`${path} exceeds the per-file asset limit.`);
+      selectedBytes += f.size;
+      if (selectedBytes > ASSET_LIMITS.maxTotalBytes + 4_000_000)
+        throw new Error("Folder exceeds the project import limit.");
+      entries[path] = new Uint8Array(await f.arrayBuffer());
     }
-    importProject(
+    const { files, assets } = await importArchiveEntries(entries);
+    await importProject(
       files,
       selectedFiles[0]?.webkitRelativePath.split("/")[0] ?? "Local project",
+      { assets },
     );
     input.value = "";
   } catch (e) {
@@ -1167,25 +1809,26 @@ $("zip-input").onchange = async () => {
     const input = $<HTMLInputElement>("zip-input");
     const f = input.files?.[0];
     if (!f) return;
-    if (f.size > 8_000_000) throw new Error("Choose a source ZIP under 8 MB.");
-    let total = 0;
+    message("Opening project", "Reading project ZIP…");
+    if (f.size > ASSET_LIMITS.maxTotalBytes + 4_000_000)
+      throw new Error("Choose a project ZIP under 68 MB.");
+    let archiveBytes = 0;
     const archive = unzipSync(new Uint8Array(await f.arrayBuffer()), {
       filter: (entry) => {
-        if (
-          !/\.(muz|md)$/.test(entry.name) &&
-          !entry.name.endsWith("muzpad.json")
-        )
-          return false;
-        total += entry.originalSize;
-        if (total > 4_000_000)
-          throw new Error("ZIP contains more than 4 MB of source.");
+        const relevant =
+          /\.(muz|md|mid|midi|wav|flac)$/i.test(entry.name) ||
+          entry.name.endsWith("muzpad.json");
+        if (!relevant) return false;
+        if (entry.originalSize > ASSET_LIMITS.maxFileBytes)
+          throw new Error("ZIP contains a file over the import limit.");
+        archiveBytes += entry.originalSize;
+        if (archiveBytes > ASSET_LIMITS.maxTotalBytes + 4_000_000)
+          throw new Error("ZIP expands beyond the project import limit.");
         return true;
       },
     });
-    const files = Object.fromEntries(
-      Object.entries(archive).map(([p, bytes]) => [p, strFromU8(bytes)]),
-    );
-    importProject(files, f.name.replace(/\.zip$/i, ""));
+    const { files, assets } = await importArchiveEntries(archive);
+    await importProject(files, f.name.replace(/\.zip$/i, ""), { assets });
     input.value = "";
   } catch (e) {
     error(e);
@@ -1315,7 +1958,7 @@ try {
   catalog = await response.json();
   let restored: Project | undefined;
   try {
-    const draft = JSON.parse(localStorage.getItem("muzpad-draft-v1") ?? "null");
+    const draft = await loadStoredProject("muzpad-draft-v1");
     if (draft?.files && draft.files[draft.entry]) {
       validateFiles(draft.files);
       restored = draft;
@@ -1325,7 +1968,7 @@ try {
   const needsGist = requested !== null;
   // A share URL always fetches its source. Keep the draft recoverable, but never
   // present it as the requested gist, including when GitHub cannot be reached.
-  if (needsGist && restored) preserveProject(false, restored);
+  if (needsGist && restored) await preserveProject(false, restored);
   const initialBuild = openProject(
     (!needsGist && restored) || {
       id: "untitled-project",
@@ -1336,6 +1979,7 @@ try {
     !needsGist,
   );
   if (needsGist) {
+    await initialBuild;
     // Keep the requested URL on failure so a reload can retry the same gist.
     setGistURL(requested);
     await importGist(requested, restored);

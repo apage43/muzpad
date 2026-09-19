@@ -1,7 +1,8 @@
 import { test, expect } from "@playwright/test";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { unzipSync } from "fflate";
 const fixture = {
   id: "browser-project",
   title: "Browser project",
@@ -16,7 +17,24 @@ let main = song({title: "Browser project", tempo: 120,
   tail: 0.1});`,
   },
 };
+const countWorkers = async (page: any) =>
+  page.evaluate(
+    () =>
+      (window as any).__muzpadWorkers.filter((url: string) =>
+        url.includes("render.worker"),
+      ).length,
+  );
 test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => {
+    const NativeWorker = window.Worker;
+    (window as any).__muzpadWorkers = [];
+    window.Worker = class extends NativeWorker {
+      constructor(url: string | URL, options?: WorkerOptions) {
+        (window as any).__muzpadWorkers.push(String(url));
+        super(url, options);
+      }
+    };
+  });
   await page.addInitScript((value) => {
     if (!localStorage.getItem("muzpad-draft-v1"))
       localStorage.setItem("muzpad-draft-v1", JSON.stringify(value));
@@ -26,6 +44,7 @@ test.beforeEach(async ({ page }) => {
 test("Ctrl+Enter rebuilds without inserting a line", async ({ page }) => {
   await page.goto("./");
   await expect(page.locator("#build-state")).toHaveText("Accepted");
+  const rendererWorkers = await countWorkers(page);
   await page.locator('[data-file="production.muz"]').click();
   await page.locator(".cm-content").click();
   await page.keyboard.press("Control+End");
@@ -36,7 +55,76 @@ test("Ctrl+Enter rebuilds without inserting a line", async ({ page }) => {
   await page.keyboard.press("Control+Enter");
 
   await expect(page.locator("#revision")).toHaveText("Revision 2 accepted");
+  expect(await countWorkers(page)).toBe(rendererWorkers);
   await expect(page.locator(".cm-line")).toHaveCount(lines);
+  await page.locator("#revision-effects summary").click();
+  await expect(page.locator("#diff-category")).toBeVisible();
+  await expect(page.locator("#diff-page pre")).toBeVisible();
+});
+
+test("cancel keeps the accepted renderer and inspection revision", async ({
+  page,
+}) => {
+  await page.goto("./");
+  await expect(page.locator("#build-state")).toHaveText("Accepted");
+  const rendererWorkers = await countWorkers(page);
+  await page.locator("#play").click();
+  await expect(page.locator("#play")).toHaveText("Ⅱ Pause");
+  expect(await countWorkers(page)).toBe(rendererWorkers);
+  await page.locator('[data-file="production.muz"]').click();
+  await page.locator(".cm-content").click();
+  await page.keyboard.press("Control+End");
+  await page.keyboard.type(" ");
+  await page.locator("#run").click();
+  await page.locator("#cancel").dispatchEvent("click");
+  await expect(page.locator("#build-state")).toHaveText("Cancelled");
+  await expect(page.locator("#play")).toHaveText("Ⅱ Pause");
+  await page.locator('[data-view="routing"]').click();
+  await expect(page.locator(".network")).toBeVisible();
+});
+
+test("folder MIDI assets survive compilation and ZIP export", async ({
+  page,
+}) => {
+  const dir = await mkdtemp(join(tmpdir(), "muzpad-assets-"));
+  try {
+    await mkdir(join(dir, "assets"));
+    await writeFile(
+      join(dir, "song.muz"),
+      'song({tracks:[track("midi",midi("assets/part.mid"),synth("bell"))],tail:0})',
+    );
+    await writeFile(
+      join(dir, "assets", "part.mid"),
+      Buffer.from(
+        "4d546864000000060000000101e04d54726b0000000d00903c648360803c0000ff2f00",
+        "hex",
+      ),
+    );
+    await page.goto("./");
+    await expect(page.locator("#build-state")).toHaveText("Accepted");
+    await page.locator("#folder-input").setInputFiles(dir);
+    await expect(page.locator("#project-title")).toHaveText(
+      dir.split("/").at(-1)!,
+    );
+    await expect(page.locator("#build-state")).toHaveText("Accepted");
+    await expect(page.locator("#build-detail")).toContainText("1 tracks");
+    await page.reload();
+    await expect(page.locator("#build-state")).toHaveText("Accepted");
+    await expect(page.locator("#project-title")).toHaveText(
+      dir.split("/").at(-1)!,
+    );
+    const downloadEvent = page.waitForEvent("download");
+    await page.locator("#download").click();
+    const download = await downloadEvent;
+    const archivePath = await download.path();
+    expect(archivePath).toBeTruthy();
+    const archive = unzipSync(new Uint8Array(await readFile(archivePath!)));
+    expect(Buffer.from(archive["assets/part.mid"]).toString("hex")).toBe(
+      "4d546864000000060000000101e04d54726b0000000d00903c648360803c0000ff2f00",
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("static deployment: playback, rejected edits, source navigation, views, and export", async ({
@@ -46,6 +134,7 @@ test("static deployment: playback, rejected edits, source navigation, views, and
   page.on("pageerror", (e) => errors.push(e.message));
   await page.goto("./");
   await expect(page.locator("#build-state")).toHaveText("Accepted");
+  const rendererWorkers = await countWorkers(page);
   await expect(page.locator("#build-detail")).toContainText("1 tracks");
   await page.locator("#play").click();
   await expect(page.locator("#clock")).not.toHaveText("0:00", {
@@ -61,6 +150,7 @@ test("static deployment: playback, rejected edits, source navigation, views, and
   await expect(page.locator("#build-state")).toHaveText("Needs attention");
   await expect(page.locator("#diagnostic-list")).toContainText("bad_symbol");
   await expect(page.locator("#play")).toHaveText("Ⅱ Pause");
+  expect(await countWorkers(page)).toBe(rendererWorkers);
   await page.locator("[data-diagnostic]").click();
   await expect(page.locator("#source-path")).toHaveText("production.muz");
   // Undo and recompile without losing the accepted snapshot.
@@ -70,6 +160,7 @@ test("static deployment: playback, rejected edits, source navigation, views, and
   await page.keyboard.press("Backspace");
   await page.locator("#run").click();
   await expect(page.locator("#build-state")).toHaveText("Accepted");
+  expect(await countWorkers(page)).toBe(rendererWorkers);
   await page.locator("#play").click();
   await page.locator("#section").selectOption("1");
   await expect(page.locator("#clock")).toHaveText("0:04");
@@ -121,6 +212,7 @@ test("new project, local draft recovery, and switchable paper theme", async ({
   await page.locator("#theme-toggle").click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   await page.locator("#new-project").click();
+  await expect(page.locator("#project-title")).toHaveText("Untitled project");
   await expect(page.locator("#build-state")).toHaveText("Accepted");
   await expect(page.locator("#build-detail")).toContainText("1 tracks");
   await page.reload();
@@ -234,15 +326,19 @@ test("arrangement navigation stays usable at deep zoom and follows only when ena
   const fitted = await viewport.evaluate((el) => el.clientWidth);
   await canvas.click({ position: { x: 130 + (fitted - 142) * 0.51, y: 43 } });
   await expect(page.locator("#clock")).toHaveText("0:04");
+  await page.locator("#zoom").fill("4");
+  await page.locator("#zoom").dispatchEvent("input");
+  await viewport.evaluate((el) => {
+    el.scrollLeft = 0;
+  });
+  await expect(viewport).toHaveAttribute("data-inspection-state", "detail");
   await canvas.click({
-    position: { x: 130 + ((fitted - 142) * 0.5) / 16, y: 85 },
+    position: { x: 135, y: 70 },
   });
   await expect(page.locator("#selection-label")).toContainText("C4");
 });
 
-test("Markdown renders safely with local navigation", async ({
-  page,
-}) => {
+test("Markdown renders safely with local navigation", async ({ page }) => {
   await page.addInitScript((base) => {
     localStorage.setItem(
       "muzpad-draft-v1",

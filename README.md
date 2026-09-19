@@ -22,9 +22,9 @@ Open the URL printed by Vite. Choose Still Our Own from the Gists sidebar to
 load its source from GitHub, or start with the new project. Imported gists compile
 locally on opening; press Play to enable browser audio. Every project open or reload
 automatically builds, including local folders, ZIPs, new projects, and recovered drafts. Rebuild, or Cmd/Ctrl+Enter in the editor, accepts a new source
-revision. Invalid edits retain the previous accepted session. A successful run
-rebuilds audio at the current position; held voices and effect tails are not
-preserved across revisions.
+revision. Invalid edits retain the previous accepted session. Compatible edits
+retain the rendering engine, held voices and matching processor state; structural
+changes use the engine's reconciliation decisions and cutover fades.
 
 ## Workspace
 
@@ -32,8 +32,11 @@ preserved across revisions.
   together under one section. Markdown opens as formatted documentation, with
   relative links to included documents and source files opening in the workbench.
 - Open a local folder or project ZIP. Relative imports stay relative to their
-  declaring module. Only muz source, Markdown documentation, and muzpad metadata
-  are imported. Up to 500 files and 4 MB of text are supported.
+  declaring module. Muz source, Markdown documentation, muzpad metadata, and
+  project-relative MIDI, WAV, and FLAC assets are imported. Text and binary
+  assets remain separate in browser storage. Up to 500 source files and 4 MB of
+  text are supported; binary assets are limited to 256 files, 16 MB per file,
+  and 64 MB total.
 - The header distinguishes **Folder connected** from **Browser copy**, shows the
   folder's unsaved-file count, and groups current-workspace actions separately
   from opening other projects. Gist copies explicitly say that edits stay local.
@@ -64,7 +67,8 @@ preserved across revisions.
 - Select a track to analyze its output, or choose Master in the analysis menu.
   The analysis signal is separate from the audible mix. Collapse the inspector
   to give the arrangement more room. Contrib folders show sample and plugin
-  requirements; these dependencies are browseable but unavailable in the browser.
+  requirements; native plugins remain unavailable, while supported sample files
+  must be supplied as project assets.
 - Click a diagnostic or the related-source action to navigate to a declaration.
   Source attribution is best effort for generated material. Graph links refer
   to the accepted revision; unsaved edits can move those source lines.
@@ -74,9 +78,13 @@ preserved across revisions.
   are not published back to GitHub or included in a shared link. Opening or reloading
   a `?gist=` URL always fetches its source from GitHub, even for the same gist or
   pinned revision. Saved browser edits remain available in Previous workspace.
-- Download folder/ZIP/new projects as ZIPs. Local draft recovery uses browser
-  storage; clearing site data removes drafts. Previous workspace restores the
-  preceding project when switching projects.
+- Download folder/ZIP/new projects as ZIPs, including their unchanged binary
+  assets. Asset-bearing drafts and Previous workspace use IndexedDB with a small
+  localStorage marker; text-only drafts retain the legacy localStorage format.
+  Local draft recovery uses browser storage; clearing site data removes
+  drafts. Previous workspace restores the preceding project when switching
+  projects. Gist links are source-only and cannot carry asset dependencies; use
+  a project ZIP for a piece that depends on binary assets.
 
 Visualizations are read only. Selecting notes or graph objects does not edit the
 music. Scope and spectrum show actual selected output; note marks show compiled
@@ -88,7 +96,8 @@ or changing the audible mix.
 Kit tracks appear as collapsible groups with compact named voice lanes. At close
 zoom, diamonds mark performed hit onsets; size and shade show attack velocity.
 At wide zoom, bars aggregate hit count and average velocity in four-pixel bins.
-Collapsed kits show aggregate hit density. Pitched tracks retain note contours.
+Collapsed kits show aggregate hit density. Pitched tracks show note contours at
+detail zoom and bounded density summaries at wide zoom.
 Lane meters, hit inspection, analysis selection, and source navigation use the
 physical voice tracks. Group membership comes from the engine's authored metadata,
 so custom names work and unrelated dotted track IDs stay independent.
@@ -144,8 +153,9 @@ npm run gist:create -- ../muz-projects/my-piece song.muz "My piece"
 ```
 
 This command creates a new gist each time. It includes source and Markdown,
-encodes nested filenames with a path manifest, and excludes hidden directories,
-assets, and generated media. Builds and deployments never create gists.
+encodes nested filenames with a path manifest, and excludes hidden directories
+and generated media. Projects containing MIDI/WAV/FLAC assets are rejected with
+an explanation to use ZIP export instead. Builds and deployments never create gists.
 
 The Cloudflare configuration serves `dist/` at `muzpad.plausiblyreliable.com`.
 Deploy only when requested. After signing in with Wrangler:
@@ -169,24 +179,43 @@ records the core commit, clean state, and WASM SHA-256.
 ## Runtime
 
 The compiler and rendering workers each instantiate the same WASM library.
-Compilation returns inspection data plus a session snapshot with performed event
-arrays explicitly included. A replacement rendering worker prepares the candidate
-before the accepted worker is replaced. Rejected compilation/preparation retains
-the previous engine. Compiler work has a cancel action and a 30-second timeout.
+Compilation returns a revision summary and a checked playable snapshot. Detailed
+graph, arrangement, patch, automation, diagnostic, source-location, provenance,
+and revision-difference data is requested afterward in revision-checked pages of
+at most 1,000 rows and 1 MiB. The arrangement requests only its visible time
+range and discards old ranges from its bounded cache. Patch and automation detail
+is loaded only when its view opens. Stale pages are rejected rather than being
+shown for a newer accepted revision.
+
+A retained rendering worker prepares then applies candidates between render
+blocks, checking request, base revision and transport generation. The compiler
+marks a candidate accepted only after the apply acknowledgement; rejected or
+discarded preparation retains the previous engine and inspectable revision.
+Cancellation can wait for a synchronous WASM preparation to return, but cancelled
+preparations cannot commit. Cancellation closes once apply is submitted, until
+the accepted UI revision is published. Fatal recovery replaces the worker and reports lost
+continuity. Compiler requests have a 30-second timeout. Note inspection distinguishes its authored definition, latest
+relevant edit, and occurrence context when provenance is available, and reports
+fallback quality explicitly for imported assets.
 
 The rendering worker fills a bounded queue of 1024-frame stereo PCM buffers. The
 AudioWorklet drains them, returns buffers for reuse, and reports consumed positions
-and corresponding track meters. Seek epochs discard obsolete queued audio. The
+and corresponding track meters. Blocks retain revision identity: already queued
+audio drains before the new revision becomes audible, independently of the
+accepted UI revision. Structural fades use a credited boundary block, or queue
+boundary ramps when the queue is full; applying never exceeds the credit budget.
+Seek epochs discard obsolete queued audio. The
 queue holds at most about half a second at 48 kHz; initial playback primes roughly
 170 ms. Worker scheduling and host audio add latency. No real-time input is promised.
 
 ## Current limits
 
 Desktop browsers are the initial target. Native VST3/CLAP plugins are unavailable.
-Local sample, audio-clip and MIDI-file imports are not implemented; contrib packs
-that need those assets are browseable but cannot play. There is no recording,
-note/automation/patch editing, or seamless live device
-reconciliation. Large or expensive programs can exceed browser memory/CPU budgets;
+Local MIDI, WAV, and FLAC files can be stored with a project and supplied to the
+portable engine. Other asset formats and native plugin dependencies remain
+unavailable. There is no recording or note/automation/patch editing. Structural
+preparation is synchronous on the rendering worker and may exhaust queued audio.
+Large or expensive programs can exceed browser memory/CPU budgets;
 the UI reports audio underruns rather than claiming glitch-free playback.
 
 The first timing check through the WASM bridge compiled Still Our Own in roughly

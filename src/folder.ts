@@ -1,3 +1,11 @@
+import {
+  ASSET_LIMITS,
+  createAsset,
+  isAssetPath,
+  normalizeProjectPath,
+  assetTransfers,
+} from "./assets.js";
+
 type FileHandle = {
   kind: "file";
   getFile(): Promise<File>;
@@ -37,29 +45,54 @@ export const pickFolder = () =>
   });
 export const supportedFile = (path: string) =>
   /\.(muz|md)$/i.test(path) || path === "muzpad.json";
-const skipped = new Set(["assets", "out", "node_modules", "target", "dist"]);
+const skipped = new Set(["out", "node_modules", "target", "dist"]);
 
-export async function readFolder(root: DirectoryHandle) {
+export async function readProjectFolder(root: DirectoryHandle) {
   const files: Record<string, string> = {};
-  let bytes = 0;
+  const assets: Record<string, Awaited<ReturnType<typeof createAsset>>> = {};
+  let textBytes = 0;
+  let assetBytes = 0;
+  let assetCount = 0;
   async function visit(dir: DirectoryHandle, prefix = "") {
     for await (const entry of dir.values()) {
       if (entry.name.startsWith(".") || skipped.has(entry.name)) continue;
-      const path = prefix + entry.name;
+      const path = normalizeProjectPath(prefix + entry.name);
       if (entry.kind === "directory") await visit(entry, `${path}/`);
       else if (supportedFile(path)) {
         const file = await entry.getFile();
-        bytes += file.size;
-        if (bytes > 4_000_000 || Object.keys(files).length >= 500)
+        textBytes += file.size;
+        if (textBytes > 4_000_000 || Object.keys(files).length >= 500)
           throw new Error(
             "Open a project with at most 500 source files and 4 MB of text.",
           );
         files[path] = await file.text();
+      } else if (isAssetPath(path)) {
+        const file = await entry.getFile();
+        if (file.size > ASSET_LIMITS.maxFileBytes)
+          throw new Error(`${path} exceeds the per-file asset limit.`);
+        assetBytes += file.size;
+        assetCount++;
+        if (assetBytes > ASSET_LIMITS.maxTotalBytes)
+          throw new Error(
+            `Project assets exceed ${ASSET_LIMITS.maxTotalBytes} bytes.`,
+          );
+        if (assetCount > ASSET_LIMITS.maxFiles)
+          throw new Error(
+            `Project contains more than ${ASSET_LIMITS.maxFiles} assets.`,
+          );
+        assets[path] = await createAsset(path, await file.arrayBuffer());
       }
     }
   }
   await visit(root);
-  return files;
+  assetTransfers(assets);
+  return { files, assets };
+}
+
+// Preserve the source-only result used by the current workbench until its
+// project model adopts readProjectFolder's separate binary asset collection.
+export async function readFolder(root: DirectoryHandle) {
+  return (await readProjectFolder(root)).files;
 }
 
 export class MountedFolder {
