@@ -28,6 +28,9 @@ export function arrangementRows(
           attack_velocity: n.velocity * 127,
         })) ??
         [];
+      const pitches = (t.overview ?? []).flatMap(
+        (bin: any) => bin.pitches ?? [],
+      );
       return [
         t.track,
         {
@@ -39,11 +42,17 @@ export function arrangementRows(
           ppq: t.ppq ?? 960_000,
           min: notes.reduce(
             (n: number, note: any) => Math.min(n, note.key),
-            48,
+            pitches.reduce(
+              (min: number, key: number) => Math.min(min, key),
+              48,
+            ),
           ),
           max: notes.reduce(
             (n: number, note: any) => Math.max(n, note.key),
-            60,
+            pitches.reduce(
+              (max: number, key: number) => Math.max(max, key),
+              60,
+            ),
           ),
           top: 0,
           height: 56,

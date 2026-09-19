@@ -711,9 +711,16 @@ async function refreshArrangement() {
     const tracks = ids.length
       ? views.graph.tracks.filter((track: any) => ids.includes(track.id))
       : views.graph.tracks.slice(0, 12);
-    const overview = arrangement.densityMode;
+    const kitTracks = new Set<string>(
+      (views.graph.extras.track_groups ?? [])
+        .filter((group: any) => group.kind === "kit")
+        .flatMap((group: any) =>
+          group.members.map((member: any) => member.track),
+        ),
+    );
     const pages = await Promise.all(
       tracks.map(async (track: any) => {
+        const overview = arrangement.densityMode && kitTracks.has(track.id);
         const ppq = track.source?.summary?.ppq ?? 960_000;
         const start_tick = Math.floor(range.start * ppq);
         const request = {

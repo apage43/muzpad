@@ -402,6 +402,22 @@ export class Arrangement {
           140,
           top + 20,
         );
+      } else if (track.kind === "pitched" && track.overview?.length) {
+        // Bounded pitch occupancy preserves melody/chord shape, rather than
+        // turning pitched material into a count-only density graph.
+        c.fillStyle = color("#fff");
+        c.globalAlpha = 0.7;
+        for (const bin of track.overview) {
+          const a = bin.start_tick / track.ppq;
+          const b = bin.end_tick / track.ppq;
+          for (const key of bin.pitches ?? []) {
+            const y =
+              top +
+              43 -
+              ((key - track.min) / Math.max(1, track.max - track.min)) * 31;
+            c.fillRect(x(a), y, Math.max(1.5, (b - a) * this.scale), 2.5);
+          }
+        }
       } else if (
         track.overview?.length ||
         (track.kind !== "pitched" &&
@@ -473,7 +489,7 @@ export class Arrangement {
         c.fillStyle = color("#747474");
         c.fillText(
           track.overview?.length
-            ? `${track.overview.reduce((sum: number, bin: any) => sum + bin.notes, 0)} visible notes`
+            ? "Pitch overview · zoom for notes"
             : `${track.notes.length} notes`,
           12,
           top + 40,

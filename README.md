@@ -96,8 +96,9 @@ or changing the audible mix.
 Kit tracks appear as collapsible groups with compact named voice lanes. At close
 zoom, diamonds mark performed hit onsets; size and shade show attack velocity.
 At wide zoom, bars aggregate hit count and average velocity in four-pixel bins.
-Collapsed kits show aggregate hit density. Pitched tracks show note contours at
-detail zoom and bounded density summaries at wide zoom.
+Collapsed kits show aggregate hit density. Pitched tracks retain note contours
+at every zoom: exact notes when the visible detail fits, and bounded pitch/time
+occupancy for dense ranges. Zooming into an overview restores individual notes.
 Lane meters, hit inspection, analysis selection, and source navigation use the
 physical voice tracks. Group membership comes from the engine's authored metadata,
 so custom names work and unrelated dotted track IDs stay independent.
