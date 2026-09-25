@@ -2,6 +2,8 @@ import { loadGist, parseGist } from "./gist.js";
 import { color, setTheme, currentTheme } from "./theme";
 import "./style.css";
 import { AudioPlayer, Compiler } from "./audio";
+import { ProjectExporter } from "./export";
+const exporter = new ProjectExporter();
 import {
   canMountFolder,
   pickFolder,
@@ -106,7 +108,7 @@ const starter =
   'use "std/synthesis" as synths;\n\nlet motif = phrase("C4:q E4:q G4:q B4:q");\n\nsong({\n    title: "Untitled project",\n    tempo: 120,\n    tracks: [track("lead", motif.repeat(4), synths.pluck())],\n    tail: 2\n})\n';
 
 $("app").innerHTML = `
-  <header class="topbar"><div class="brand"><span class="brand-mark" aria-hidden="true">∿</span>muzpad<span class="alpha">01</span></div><div class="project-identity"><div class="project-title" id="project-title">A place for music in code</div><div class="workspace-status"><strong id="workspace-mode">Browser copy</strong><span id="folder-state">No folder connected</span></div></div><div class="project-actions" aria-label="Current workspace actions"><button id="reload-folder" title="Read files from the connected folder and rebuild. Keeps this working copy in Previous workspace." hidden>Reload</button><button id="save-folder" hidden>Save to folder</button><button id="download">Export ZIP ↓</button><a id="view-gist" class="button-link" target="_blank" rel="noopener noreferrer" hidden>View gist ↗</a></div><div class="top-actions"><button id="theme-toggle" aria-label="Switch color theme">Dark view ◐</button><button id="new-project">New project</button><button id="mount-folder" title="Connect a local folder to reload files and save changes back to disk" hidden>Connect folder</button><button id="open-folder" title="Import a browser copy; download a ZIP to keep your changes">Import folder</button><button id="import-gist">Import from gist</button><button id="open-zip">Open ZIP</button></div></header>
+  <header class="topbar"><div class="brand"><span class="brand-mark" aria-hidden="true">∿</span>muzpad<span class="alpha">01</span></div><div class="project-identity"><div class="project-title" id="project-title">A place for music in code</div><div class="workspace-status"><strong id="workspace-mode">Browser copy</strong><span id="folder-state">No folder connected</span></div></div><div class="project-actions" aria-label="Current workspace actions"><button id="reload-folder" title="Read files from the connected folder and rebuild. Keeps this working copy in Previous workspace." hidden>Reload</button><button id="save-folder" hidden>Save to folder</button><button id="export-media" disabled>Export audio / MIDI ↓</button><button id="download">Export ZIP ↓</button><a id="view-gist" class="button-link" target="_blank" rel="noopener noreferrer" hidden>View gist ↗</a></div><div class="top-actions"><button id="theme-toggle" aria-label="Switch color theme">Dark view ◐</button><button id="new-project">New project</button><button id="mount-folder" title="Connect a local folder to reload files and save changes back to disk" hidden>Connect folder</button><button id="open-folder" title="Import a browser copy; download a ZIP to keep your changes">Import folder</button><button id="import-gist">Import from gist</button><button id="open-zip">Open ZIP</button></div></header>
   <div class="transport"><div class="transport-buttons"><button id="restart" class="icon-button" aria-label="Restart" title="Restart">↤</button><button id="play" class="play-button" disabled>▶ Play</button><button id="stop" class="icon-button" aria-label="Stop" title="Stop" disabled>■</button></div><div class="clock"><span id="clock">0:00</span><span id="length">/ —</span></div><div class="position"><span id="bar">Bar 1 · Beat 1</span><span id="tempo">— BPM</span></div><select id="section" aria-label="Seek to section"><option value="">Sections</option></select><button id="loop" aria-pressed="false">↻ Loop section</button><details class="range-menu"><summary>Range</summary><div><label>Start beat <input id="loop-start" type="number" min="0" value="0"></label><label>End beat <input id="loop-end" type="number" min="0" value="16"></label><button id="apply-loop">Loop range</button></div></details><div class="master-meter" title="Master output peak"><span id="meter-fill"></span></div><span id="master-level">−∞ dB</span><div class="transport-spacer"></div><span id="revision">No accepted revision</span><button id="cancel" hidden>Cancel</button><button id="run" class="primary">Rebuild <span>⌘ / Ctrl ↵</span></button></div>
   <main class="workspace"><aside class="explorer"><div class="pane-heading">Workspace <button id="add-file" title="Add a source file" aria-label="Add a source file">＋</button></div><label class="file-search"><input id="file-search" placeholder="Find a file…" aria-label="Find a file"></label><div id="file-tree"></div><div class="explorer-foot" id="workspace-help">Browser copy. Download a ZIP to keep your work.</div></aside>
   <section class="source-pane"><div class="tabs" id="file-tabs"></div><div class="source-tools"><span id="source-path"></span><label class="entry-choice">Entrypoints <select id="entry-select" aria-label="Entrypoints" title="Choose the file to rebuild"></select></label><button id="format">Format</button><button id="set-entry">Use as entry</button></div><div id="entry-notice" role="status" hidden></div><div id="editor"></div><div id="requirements" hidden></div><div id="document" hidden></div><div class="source-foot"><span id="source-mode">muz source</span><span id="entry-label"></span></div></section>
@@ -445,6 +447,8 @@ async function openProject(next: Project, rebuild = true, keepSession = false) {
     revision = 0;
     accepted = -1;
     acceptedEntry = "";
+    exporter.set();
+    exporter.close();
   }
   if (keepSession) {
     tabs = tabs.filter(
@@ -980,6 +984,13 @@ async function run() {
     status = nextStatus;
     accepted = sourceRevision;
     acceptedEntry = sourceEntry;
+    exporter.set({
+      snapshot: result.snapshot,
+      assets: assetEntries,
+      duration: nextStatus.duration,
+      revision: sourceRevision,
+      name: project.id || project.title,
+    });
     $("loop").setAttribute("aria-pressed", String(!!player.loop));
     $("play").removeAttribute("disabled");
     $("stop").removeAttribute("disabled");
@@ -1668,6 +1679,8 @@ $("gist-form").onsubmit = async (event) => {
   }
 };
 $("download").onclick = download;
+$("export-media").onclick = () =>
+  exporter.open(revision !== accepted || project.entry !== acceptedEntry);
 $("file-search").oninput = tree;
 $("new-project").onclick = async () => {
   try {

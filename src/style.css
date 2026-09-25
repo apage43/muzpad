@@ -1429,3 +1429,67 @@ select:focus-visible {
   color: var(--c-eee);
   font-size: 11px;
 }
+
+.export-dialog {
+  width: min(580px, calc(100vw - 32px));
+  max-height: calc(100vh - 40px);
+  overflow: auto;
+  border: 1px solid var(--c-333);
+  border-radius: 12px;
+  padding: 24px;
+  background: var(--c-151515);
+  color: var(--c-eee);
+}
+.export-dialog::backdrop {
+  background: #0008;
+}
+.export-dialog h2 {
+  margin-top: 0;
+}
+.export-dialog fieldset {
+  border: 1px solid var(--c-333);
+  margin: 20px 0 12px;
+  padding: 16px;
+}
+.export-dialog label {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+}
+.export-help {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--c-999);
+}
+.export-tracks {
+  max-height: 180px;
+  overflow: auto;
+  margin-top: 16px;
+}
+.export-settings {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 16px;
+}
+.export-settings[hidden] {
+  display: none;
+}
+.export-settings label {
+  flex-direction: column;
+  align-items: stretch;
+}
+.export-settings input {
+  width: 100%;
+  box-sizing: border-box;
+}
+.export-dialog progress {
+  width: 100%;
+}
+.export-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}

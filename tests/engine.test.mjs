@@ -148,6 +148,17 @@ test("independent WASM instances transfer MIDI, WAV and FLAC memory assets", asy
   });
   assert.equal(compiled.snapshot.performed[0].midi.notes.length, 1);
   assert.ok(compiled.snapshot.assets.length >= 2);
+  const midiExporter = await createEngine(bytes);
+  const midiExport = midiExporter.call({
+    command: "export_midi",
+    snapshot: compiled.snapshot,
+    tracks: ["w"],
+  });
+  assert.equal(
+    Buffer.from(midiExport.bytes).toString("ascii", 0, 4),
+    "MThd",
+    "MIDI for a sampled instrument exports without uploading its audio assets",
+  );
   renderer.call({ command: "load", snapshot: compiled.snapshot, rate: 48000 });
   renderer.call({ command: "render", frames: 480 });
   assert.ok(renderer.audio(480).some((v) => Math.abs(v) > 0.0001));

@@ -316,6 +316,38 @@ impl Host {
                 self.accepted = self.candidate.take();
                 Ok(json!({"revision":revision}))
             }
+            "export_midi" => {
+                let bytes = serde_json::to_vec(&v["snapshot"])?;
+                let session = self.context.run(|| {
+                    muz::snapshot::PlayableSnapshotV1::decode_checked(
+                        &bytes,
+                        muz::snapshot::MAX_SNAPSHOT_BYTES,
+                    )?
+                    .restore_description()
+                })?;
+                let selected: Vec<String> = serde_json::from_value(v["tracks"].clone())?;
+                ensure!(!selected.is_empty(), "select at least one MIDI track");
+                let ids: Vec<_> = session
+                    .tracks
+                    .iter()
+                    .filter(|t| matches!(t.source, muz::model::TrackSource::Midi(_)))
+                    .map(|t| t.id.as_str())
+                    .collect();
+                ensure!(
+                    selected.iter().all(|id| ids.contains(&id.as_str())),
+                    "unknown MIDI track"
+                );
+                // Export before filtering so the conductor map is independent of selection.
+                let mut doc = muz::smf::export(&session)?;
+                doc.tracks = doc
+                    .tracks
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i == 0 || selected.iter().any(|id| id == ids[*i - 1]))
+                    .map(|(_, track)| track)
+                    .collect();
+                Ok(json!({"bytes": muz::smf::encode(&doc)?}))
+            }
             "load" | "prepare" => {
                 self.pending = None;
                 let bytes = serde_json::to_vec(&v["snapshot"])?;
@@ -410,7 +442,7 @@ impl Host {
                 );
                 self.muted = muted;
                 self.solo = solo;
-                self.apply_audition(true)?;
+                self.apply_audition(v["ramp"].as_bool().unwrap_or(true))?;
                 Ok(json!({"muted":self.muted,"solo":self.solo}))
             }
             "status" => self.status(),
@@ -572,7 +604,7 @@ impl Host {
         Ok(
             json!({"revision":self.revision,"generation":self.generation,"beat": s.transport.beat_position, "seconds": s.transport.project_frame / s.transport.sample_rate,
             "endBeat": s.end_tick as f64 / muz::compile::PPQ as f64,
-            "duration": s.end_project_frame / s.transport.sample_rate, "peak": s.last_peak, "rms": s.last_rms,
+            "duration": s.end_project_frame / s.transport.sample_rate, "latencyFrames": self.engine.as_ref().unwrap().latency_samples(), "peak": s.last_peak, "rms": s.last_rms,
             "bpm": s.transport.bpm, "meter": s.transport.meter,
             "done": s.ended && self.ended_frames >= self.tail_frames}),
         )

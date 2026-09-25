@@ -86,6 +86,23 @@ changes use the engine's reconciliation decisions and cutover fades.
   are not published back to GitHub or included in a shared link. Opening or reloading
   a `?gist=` URL always fetches its source from GitHub, even for the same gist or
   pinned revision. Saved browser edits remain available in Previous workspace.
+- **Export audio / MIDI** exports the accepted revision, with a reminder to rebuild
+  when the editor has newer changes. **Download master WAV** bounces the full written
+  mix and project effect tail to stereo 48 kHz / 24-bit PCM in one click. Temporary
+  listening mute/solo controls do not affect exports.
+- Custom WAV exports offer individual tracks or a selected mix, 44.1/48/96 kHz,
+  16/24-bit PCM, and a range in seconds (including the project tail). Selected tracks
+  run through buses and master effects; isolating tracks can change shared dynamics
+  and sidechains. Rendering includes the lead-in before trimming to preserve effect
+  history and sustained notes, and compensates engine latency. Files are limited to
+  256 MB; clipping is reported after download.
+- MIDI export produces a type-1 `.mid` file with one named track per selected
+  musical track and a conductor track containing tempo and meter. Performed note
+  timing, velocity, controllers and channel messages are retained at 960 PPQ;
+  instruments, audio, and mix effects are not embedded. Original MIDI channels are
+  preserved, so route tracks to separate instruments in your destination DAW.
+  Sampled tracks export their trigger notes, not a transcription of the sample.
+  Export runs separately from playback, reports progress, and can be cancelled.
 - Download folder/ZIP/new projects as ZIPs, including their unchanged binary
   assets. Asset-bearing drafts and Previous workspace use IndexedDB with a small
   localStorage marker; text-only drafts retain the legacy localStorage format.
