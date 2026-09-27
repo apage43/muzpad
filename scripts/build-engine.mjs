@@ -7,7 +7,7 @@ import {
   coreState,
   sha256,
   verifyCoreDependency,
-} from "./source-archive.mjs";
+} from "./core-build.mjs";
 const root = resolve(import.meta.dirname, "..");
 const config = await buildConfig(root);
 await verifyCoreDependency(root, config.core);

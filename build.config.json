@@ -1,9 +1,4 @@
 {
   "core": "../muz-core",
-  "gists": [],
-  "sourceArchive": {
-    "bucket": "plausibly-ml",
-    "prefix": "muz-core",
-    "baseUrl": "https://ml.plausiblyreliable.com/muz-core"
-  }
+  "gists": []
 }

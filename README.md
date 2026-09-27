@@ -187,20 +187,13 @@ The Cloudflare configuration serves `dist/` at `muzpad.plausiblyreliable.com`.
 Deploy only when requested. After signing in with Wrangler:
 
 ```sh
-npm run deploy                         # build and publish the site
-npm run deploy -- --source-archive      # also upload the engine source to R2
-npm run deploy -- --source-archive --dry-run  # local build/archive, no remote writes
+npm run deploy                 # build and publish the site
+npm run deploy -- --dry-run    # build locally without publishing
 ```
 
-The optional archive step uses `sourceArchive.bucket`, `prefix`, and `baseUrl`
-from the build configuration. It requires a clean muz-core checkout at the exact
-commit recorded during the WASM build, verifies the WASM checksum, and creates
-`muz-core-SHORT_HASH.tgz` with the tracked engine source. It uploads to
-`plausibly-ml/muz-core/muz-core-SHORT_HASH.tgz`, checks the public URL, and only then includes a
-`.tgz` link beside muz-core and deploys. Failure leaves the site unpublished.
-Normal deployments omit the link. Archives are generated under ignored
-`.artifacts/`; they are never bundled into the site. `dist/engine-build.json`
-records the core commit, clean state, and WASM SHA-256.
+The muz-core sidebar link opens the GitHub source tree at the engine commit
+recorded during the WASM build. `dist/engine-build.json` records that commit,
+the clean state, and the WASM SHA-256.
 
 ## Runtime
 

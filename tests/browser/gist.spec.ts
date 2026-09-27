@@ -144,7 +144,6 @@ test("gist import errors preserve work; sidebar links open gists and show the ac
     data.gists = [{ gist: id, title: "Gist piece" }];
     data.engine = {
       commit: "b".repeat(40),
-      sourceArchive: `https://ml.plausiblyreliable.com/muz-core/${"b".repeat(40)}.tgz`,
     };
     await route.fulfill({ json: data });
   });
@@ -171,9 +170,9 @@ test("gist import errors preserve work; sidebar links open gists and show the ac
   );
   await expect(page.locator("[data-gist]")).toContainText("Open");
   await expect(page.locator("#build-state")).toHaveText("Accepted");
-  await expect(page.locator(".source-archive")).toHaveAttribute(
+  await expect(page.locator(".core-source")).toHaveAttribute(
     "href",
-    new RegExp("/muz-core/b+\\.tgz$"),
+    `https://github.com/apage43/muz/tree/${"b".repeat(40)}`,
   );
 });
 

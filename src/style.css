@@ -1268,7 +1268,7 @@ select:focus-visible {
   color: inherit;
   text-decoration: none;
 }
-.source-archive {
+.core-source {
   float: right;
   text-transform: none;
   color: inherit;
