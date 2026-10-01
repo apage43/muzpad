@@ -142,9 +142,6 @@ test("gist import errors preserve work; sidebar links open gists and show the ac
   await page.route("**/catalog.json", async (route) => {
     const data = await (await route.fetch()).json();
     data.gists = [{ gist: id, title: "Gist piece" }];
-    data.engine = {
-      commit: "b".repeat(40),
-    };
     await route.fulfill({ json: data });
   });
   await page.route("https://api.github.com/gists/*", (route) =>
@@ -170,10 +167,6 @@ test("gist import errors preserve work; sidebar links open gists and show the ac
   );
   await expect(page.locator("[data-gist]")).toContainText("Open");
   await expect(page.locator("#build-state")).toHaveText("Accepted");
-  await expect(page.locator(".core-source")).toHaveAttribute(
-    "href",
-    `https://github.com/apage43/muz/tree/${"b".repeat(40)}`,
-  );
 });
 
 test("canceling an in-flight import keeps the current workspace", async ({

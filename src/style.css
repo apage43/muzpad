@@ -1268,12 +1268,6 @@ select:focus-visible {
   color: inherit;
   text-decoration: none;
 }
-.core-source {
-  float: right;
-  text-transform: none;
-  color: inherit;
-  font-weight: normal;
-}
 #gist-dialog {
   width: min(460px, 90vw);
 }

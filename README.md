@@ -191,9 +191,8 @@ npm run deploy                 # build and publish the site
 npm run deploy -- --dry-run    # build locally without publishing
 ```
 
-The muz-core sidebar link opens the GitHub source tree at the engine commit
-recorded during the WASM build. `dist/engine-build.json` records that commit,
-the clean state, and the WASM SHA-256.
+The muz-core sidebar shows bundled source files without an external GitHub link.
+`dist/engine-build.json` records the engine commit, clean state, and WASM SHA-256.
 
 ## Runtime
 
