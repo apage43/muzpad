@@ -132,8 +132,10 @@ Drag to pan the arrangement or either graph. In the arrangement, Ctrl/Cmd + whee
 zooms around the pointer, and Shift + wheel pans horizontally. The slider and
 plus/minus buttons zoom up to 512×; Fit shows the full project, and Center playhead
 returns to the transport position. Follow keeps the playhead visible during
-playback; manual horizontal scrolling or dragging turns it off. With the
-arrangement focused, Left/Right pan, +/− zoom, and Home fits the project.
+playback, loading each next note page before revealing it so notes and viewport
+move in one paint. Manual horizontal scrolling or dragging turns Follow off and
+cancels pending follow moves. With the arrangement focused, Left/Right pan,
++/− zoom, and Home fits the project.
 
 ## Build and static hosting
 

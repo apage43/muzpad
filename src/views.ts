@@ -49,14 +49,15 @@ export class Arrangement {
   onSeek: (beat: number) => void = () => {};
   onSelect: (track: string, note?: any) => void = () => {};
   onNavigation: () => void = () => {};
+  onFollowScroll: (scrollLeft: number) => void = () => {};
   get scale() {
     return (Math.max(1, this.width - 142) * this.zoom) / this.end;
   }
   get visibleBeats() {
     return Math.max(1, this.width - 142) / this.scale;
   }
-  visibleRange() {
-    const start = Math.max(0, this.parent.scrollLeft / this.scale);
+  visibleRange(scrollLeft = this.parent.scrollLeft) {
+    const start = Math.max(0, scrollLeft / this.scale);
     return { start, end: Math.min(this.end, start + this.visibleBeats) };
   }
   visibleTrackIds() {
@@ -356,9 +357,17 @@ export class Arrangement {
     const available = this.width - 142;
     const x = beat * this.scale - this.parent.scrollLeft;
     if (playing && this.follow && (x < 0 || x > available * 0.8)) {
-      this.parent.scrollLeft = beat * this.scale - available * 0.2;
-      this.draw();
-    } else this.drawCursor();
+      const scrollLeft = Math.max(
+        0,
+        Math.min(
+          this.parent.scrollWidth - this.parent.clientWidth,
+          beat * this.scale - available * 0.2,
+        ),
+      );
+      if (scrollLeft !== this.parent.scrollLeft)
+        this.onFollowScroll(scrollLeft);
+    }
+    this.drawCursor();
   }
   drawCursor() {
     const x =

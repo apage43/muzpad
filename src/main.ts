@@ -88,6 +88,7 @@ let views: any,
 let inspection: InspectionClient | undefined;
 let arrangementInspectionTimer: ReturnType<typeof setTimeout>;
 let arrangementInspectionToken = 0;
+let followInspectionPending = false;
 let viewRenderToken = 0;
 let explainedLocation: any;
 let explanationToken = 0;
@@ -708,11 +709,12 @@ function jumpId(id: string) {
       .catch(error);
   }
 }
-async function refreshArrangement() {
+async function refreshArrangement(followScrollLeft?: number) {
   if (!inspection || !views || !status) return;
+  clearTimeout(arrangementInspectionTimer);
   const current = inspection;
   const requestToken = ++arrangementInspectionToken;
-  const range = arrangement.visibleRange();
+  const range = arrangement.visibleRange(followScrollLeft);
   try {
     const ids = arrangement.visibleTrackIds();
     const tracks = ids.length
@@ -749,6 +751,11 @@ async function refreshArrangement() {
     );
     if (inspection !== current || requestToken !== arrangementInspectionToken)
       return;
+    if (
+      followScrollLeft !== undefined &&
+      (!player.playing || !arrangement.follow || view !== "arrangement")
+    )
+      return;
     // Keep detail only for the current visible request. Scrolling releases old
     // note/overview rows instead of accumulating a whole performance in the UI.
     const prior = new Map<string, any>();
@@ -771,6 +778,9 @@ async function refreshArrangement() {
         },
     );
     arrangement.views = views;
+    // Reveal a follow page only after its notes are ready, in the same paint.
+    if (followScrollLeft !== undefined)
+      arrangement.parent.scrollLeft = followScrollLeft;
     arrangement.layout();
     arrangement.draw();
     arrangement.parent.dataset.inspectionState = pages.some(
@@ -784,6 +794,8 @@ async function refreshArrangement() {
 }
 function scheduleArrangementInspection() {
   clearTimeout(arrangementInspectionTimer);
+  // Manual navigation invalidates an in-flight follow before the debounce fires.
+  arrangementInspectionToken++;
   arrangement.parent.dataset.inspectionState = "loading";
   arrangementInspectionTimer = setTimeout(() => void refreshArrangement(), 100);
 }
@@ -1741,6 +1753,13 @@ document.querySelectorAll<HTMLElement>("[data-view]").forEach(
       showView();
     }),
 );
+arrangement.onFollowScroll = (scrollLeft) => {
+  if (followInspectionPending || view !== "arrangement") return;
+  followInspectionPending = true;
+  void refreshArrangement(scrollLeft).finally(() => {
+    followInspectionPending = false;
+  });
+};
 arrangement.onNavigation = () => {
   $<HTMLInputElement>("zoom").value = String(Math.log2(arrangement.zoom));
   $("zoom-value").textContent = `${Number(arrangement.zoom.toFixed(1))}×`;
