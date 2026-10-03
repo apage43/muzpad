@@ -21,8 +21,11 @@ usable without investigation sessions or private artifacts.
 The user's observations are accepted, not checks to rerun for confirmation.
 Investigation used current source, existing production artifacts and isolated
 synthetic diagnostics; those forms of evidence are distinguished below. No
-feature implementation, new build, test suite, deployment or formatter was run
-for this proposal. An existing binary reporting the pinned core SHA does not
+improvement features were implemented; no test suite, deployment or formatter was run.
+Separately authorized native/static artifact rebuilding and isolated startup
+verification align the pin with the docs-only core proposal; they do not implement
+or qualify the pending improvements. Diagnostic measurements below retain their
+original artifact identities. An existing binary reporting a core SHA does not
 prove that every workbench source edit is represented by that binary.
 
 | Finding | Evidence and boundary |
@@ -520,22 +523,14 @@ P1 pending/old-revision presentation remains truthful through the redesigned UI.
 
 ## Runtime verification and implementation commit protocol
 
-Planning commits contain only each repository's own plan; no source/project
-changes, generated artifacts or deployment. Future implementation must use the
-normal repository commit rule: coherent owning changes in muzpad, engine changes
-in muz-core, never unrelated user edits. Shared prerequisites land first; frontend
-source, protocol, deployed binary and core pin cannot be partially cut over.
-
-**Planning provenance gate:** the default [build configuration](../build.config.json)
-uses the sibling core checkout. [Desktop build validation](../scripts/desktop.mjs#L45-L53)
-requires its HEAD to equal `src-tauri/core-revision`, even when differences are
-docs-only. The core proposal commit advances HEAD beyond the currently pinned
-`9fedb16a042bfaa7501eabb5e8bedcc7ec7c0778`; by source inspection this gates the next
-desktop resources/prepare/dev/build/package/release command before staging.
-Existing binaries are unchanged, not rebuilt or requalified by planning. Resolve
-planning provenance explicitly with the integration owner before those commands;
-do not silently bump the pin and claim existing child/shell/catalog binaries match
-it, or weaken the build guard. No build was run merely to confirm this condition.
+Planning commits contain each repository's own plan and, when explicitly required,
+minimal verified pin-provenance alignment; no improvement source/project changes
+or deployment. Future implementation must use the normal repository commit rule:
+coherent owning changes in muzpad, engine changes in muz-core, never unrelated user
+edits. Shared prerequisites land first; frontend source, protocol, deployed binary
+and core pin cannot be partially cut over. A docs-only core commit must still
+satisfy the existing desktop HEAD/pin guard with genuinely matching rebuilt
+artifacts; do not relabel old binary evidence or weaken the guard.
 
 Before **each future owning implementation commit**, the integration owner runs a
 separate verification pass after all slices are integrated: relevant focused
