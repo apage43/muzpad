@@ -42,6 +42,13 @@ export class Arrangement {
   selected = "";
   beat = 0;
   follow = true;
+  private visible = true;
+  private playing = false;
+  private retainedScroll: { left: number; top: number } | null = null;
+  private latestMeters: { id: string; peak: number }[] = [];
+  private get canDraw() {
+    return this.visible && this.parent.clientWidth > 0 && this.parent.clientHeight > 0;
+  }
   rows: ArrangementRow[] = [];
   get densityMode() {
     return this.scale < 24;
@@ -97,13 +104,15 @@ export class Arrangement {
     new ResizeObserver(() => {
       cancelAnimationFrame(resizeFrame);
       resizeFrame = requestAnimationFrame(() => {
-        this.draw();
+        if (!this.canDraw) return;
+        this.redraw();
         this.onNavigation();
       });
     }).observe(parent);
     parent.addEventListener(
       "scroll",
       () => {
+        if (!this.canDraw) return;
         this.draw();
         this.onNavigation();
       },
@@ -203,11 +212,34 @@ export class Arrangement {
       this.draw();
     });
   }
+  setVisible(visible: boolean) {
+    if (visible === this.visible) return;
+    if (!visible) {
+      this.retainedScroll = {
+        left: this.parent.scrollLeft,
+        top: this.parent.scrollTop,
+      };
+    }
+    this.visible = visible;
+    if (visible) {
+      this.redraw();
+      if (this.canDraw) this.onNavigation();
+    }
+  }
+  redraw() {
+    if (!this.canDraw) return;
+    this.draw();
+    this.position(this.beat, this.playing);
+    this.meters(this.latestMeters);
+  }
   reset() {
     this.views = undefined;
     this.rows = [];
     this.end = 1;
     this.beat = 0;
+    this.playing = false;
+    this.retainedScroll = null;
+    this.latestMeters = [];
     this.zoom = 1;
     this.selected = "";
     this.parent.scrollLeft = 0;
@@ -219,21 +251,21 @@ export class Arrangement {
     this.controlsLayout = "";
     this.collapsed.clear();
     this.draw();
-    this.onNavigation();
+    if (this.canDraw) this.onNavigation();
   }
   set(views: any, end: number) {
     this.views = views;
     this.end = Math.max(1, end);
     this.layout();
     this.draw();
-    this.onNavigation();
+    if (this.canDraw) this.onNavigation();
   }
   toggleGroup(id: string) {
     if (this.collapsed.has(id)) this.collapsed.delete(id);
     else this.collapsed.add(id);
     this.layout();
     this.draw();
-    this.onNavigation();
+    if (this.canDraw) this.onNavigation();
   }
   layout() {
     const focused = (document.activeElement as HTMLElement)?.dataset.kit;
@@ -334,15 +366,19 @@ export class Arrangement {
     this.onNavigation();
   }
   centerPlayhead() {
+    if (!this.canDraw) return;
     this.parent.scrollLeft =
       Math.min(this.beat, this.end) * this.scale - (this.width - 142) / 2;
     this.draw();
   }
   reveal() {
+    if (!this.canDraw) return;
     const x = 130 + this.beat * this.scale - this.parent.scrollLeft;
     if (x < 130 || x > this.width - 12) this.centerPlayhead();
   }
   meters(values: { id: string; peak: number }[]) {
+    this.latestMeters = values;
+    if (!this.canDraw) return;
     const lookup = new Map(values.map((v) => [v.id, v.peak]));
     this.rows.forEach((row, i) => {
       const span = this.meterLayer.children[i]
@@ -354,6 +390,8 @@ export class Arrangement {
   }
   position(beat: number, playing = false) {
     this.beat = beat;
+    this.playing = playing;
+    if (!this.canDraw) return;
     const available = this.width - 142;
     const x = beat * this.scale - this.parent.scrollLeft;
     if (playing && this.follow && (x < 0 || x > available * 0.8)) {
@@ -370,6 +408,7 @@ export class Arrangement {
     this.drawCursor();
   }
   drawCursor() {
+    if (!this.canDraw) return;
     const x =
       130 + Math.min(this.beat, this.end) * this.scale - this.parent.scrollLeft;
     this.cursor.hidden = !this.views || x < 130 || x > this.width - 12;
@@ -378,12 +417,17 @@ export class Arrangement {
     this.cursor.style.height = `${Math.max(0, this.parent.clientHeight - 28)}px`;
   }
   draw() {
-    if (this.parent.clientWidth === 0 || this.parent.clientHeight === 0) return;
+    if (!this.canDraw) return;
     const width = (this.width = this.parent.clientWidth);
     const height = this.parent.clientHeight;
     const ratio = Math.min(2, devicePixelRatio);
     this.surface.style.width = `${142 + Math.max(1, width - 142) * this.zoom}px`;
     this.surface.style.height = `${Math.max(height, (this.rows.at(-1)?.top ?? 58) + (this.rows.at(-1)?.height ?? 0))}px`;
+    if (this.retainedScroll) {
+      this.parent.scrollLeft = this.retainedScroll.left;
+      this.parent.scrollTop = this.retainedScroll.top;
+      this.retainedScroll = null;
+    }
     // Only allocate the visible bitmap, even when the timeline spans hundreds of thousands of pixels.
     if (this.canvas.width !== Math.round(width * ratio))
       this.canvas.width = Math.round(width * ratio);
@@ -398,7 +442,7 @@ export class Arrangement {
     c.font = "11px Arial, sans-serif";
     c.lineWidth = 1;
     if (!this.views) {
-      c.fillStyle = color("#999");
+      c.fillStyle = color("text-muted");
       c.fillText("Rebuild a project to see its performed arrangement.", 24, 48);
       this.drawCursor();
       return;
@@ -465,7 +509,7 @@ export class Arrangement {
       c.rect(130, 58, width - 130, height - 58);
       c.clip();
       if (track.kind === "group" && !this.collapsed.has(track.id)) {
-        c.fillStyle = color("#888");
+        c.fillStyle = color("text-muted");
         c.fillText(
           `${track.members!.length} lanes · ${track.notes.length} hits`,
           140,
@@ -555,7 +599,7 @@ export class Arrangement {
         c.fillText(track.label, 27, top + 17);
       } else if (track.kind === "pitched") {
         c.fillText(track.id, 12, top + 24);
-        c.fillStyle = color("#747474");
+        c.fillStyle = color("text-muted");
         c.fillText(
           track.overview?.length
             ? "Pitch overview · zoom for notes"
@@ -611,7 +655,7 @@ export class Arrangement {
     ) {
       const measure = Math.floor(b / bar) + 1,
         beat = b % bar;
-      c.fillStyle = color("#909090");
+      c.fillStyle = color("text-muted");
       c.fillText(
         beat === 0 ? `${measure}` : `${measure}.${beat + 1}`,
         x(b) + 5,
@@ -619,7 +663,7 @@ export class Arrangement {
       );
     }
     c.restore();
-    c.fillStyle = color("#888");
+    c.fillStyle = color("text-muted");
     c.fillText("PERFORMED", 12, 19);
     c.fillText("Bar · beat", 12, 47);
     this.meterLayer.style.left = `${scroll + 96}px`;
@@ -677,7 +721,7 @@ function network(
         return `<path d="M${a.x + 132},${a.y + 24} C${a.x + 156},${a.y + 24} ${b.x - 24},${b.y + 24} ${b.x},${b.y + 24}" fill="none" stroke="var(--c-555)" stroke-width="1" ${e.label ? 'stroke-dasharray="3 3"' : ""} marker-end="url(#arrow)"><title>${escapeHTML(e.label ?? `${e.from} → ${e.to}`)}</title></path>`;
       })
       .join("")}
-    ${nodes.map((n) => `<g ${n.source ? `data-source="${escapeHTML(n.source)}" tabindex="0" role="button" aria-label="Open source for ${escapeHTML(n.label)}"` : ""}><title>${escapeHTML(n.label + ": " + n.sub)}</title><rect x="${n.x}" y="${n.y}" width="132" height="48" fill="var(--c-101010)" stroke="var(--c-aaa)"/><rect x="${n.x - 2}" y="${n.y + 21}" width="4" height="6" fill="var(--c-ddd)"/><rect x="${n.x + 130}" y="${n.y + 21}" width="4" height="6" fill="var(--c-ddd)"/><text x="${n.x + 9}" y="${n.y + 19}" fill="var(--c-fff)">${escapeHTML(n.label.length > 19 ? n.label.slice(0, 18) + "…" : n.label)}</text><text x="${n.x + 9}" y="${n.y + 36}" fill="var(--c-8e8e8e)">${escapeHTML(n.sub.slice(0, 20))}</text></g>`).join("")}
+    ${nodes.map((n) => `<g ${n.source ? `data-source="${escapeHTML(n.source)}" tabindex="0" role="button" aria-label="Open source for ${escapeHTML(n.label)}"` : ""}><title>${escapeHTML(n.label + ": " + n.sub)}</title><rect x="${n.x}" y="${n.y}" width="132" height="48" fill="var(--c-101010)" stroke="var(--c-aaa)"/><rect x="${n.x - 2}" y="${n.y + 21}" width="4" height="6" fill="var(--c-ddd)"/><rect x="${n.x + 130}" y="${n.y + 21}" width="4" height="6" fill="var(--c-ddd)"/><text x="${n.x + 9}" y="${n.y + 19}" fill="var(--c-fff)">${escapeHTML(n.label.length > 19 ? n.label.slice(0, 18) + "…" : n.label)}</text><text x="${n.x + 9}" y="${n.y + 36}" fill="var(--text-muted)">${escapeHTML(n.sub.slice(0, 20))}</text></g>`).join("")}
   </svg>`;
 }
 export function patchGraph(patch: any, source: string) {

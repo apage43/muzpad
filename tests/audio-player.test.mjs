@@ -69,3 +69,38 @@ test("cancellation before preparation returns cannot submit apply", async () => 
   assert.equal(await accepted, null);
   assert.equal(requests.length, 1);
 });
+
+test("source authorization rejects before apply and discards the prepared candidate", async () => {
+  const { player, messages, requests } = playerFixture();
+  const accepted = player.accept({}, () => true, [], undefined, async () => {
+    throw new Error("source conflict");
+  });
+  await Promise.resolve();
+  requests[0].resolve({});
+  await assert.rejects(accepted, /source conflict/);
+  assert.equal(requests.length, 1);
+  assert.deepEqual(messages, [{ type: "discard", request: 1 }]);
+  assert.equal(player.revision, 0);
+});
+
+test("seek resolves only with acknowledged transport position", async () => {
+  const { player, requests } = playerFixture();
+  const pending = player.seek(4);
+  assert.equal(player.beat, 0);
+  assert.equal(requests[0].message.type, "seek");
+  requests[0].resolve({ beat: 3, generation: 2 });
+  assert.equal((await pending).beat, 3);
+  assert.equal(player.beat, 3);
+});
+
+test("an abort after apply begins cannot turn accepted audio into a cancellation", async () => {
+  const { player, requests } = playerFixture();
+  let current = true;
+  const pending = player.accept({}, () => current, [], () => { current = false; });
+  await Promise.resolve();
+  requests[0].resolve({});
+  await Promise.resolve();
+  assert.equal(requests[1].message.type, "apply");
+  requests[1].resolve({ revision: 1, endBeat: 8 });
+  assert.equal((await pending).revision, 1);
+});

@@ -1,10 +1,12 @@
 # muzpad
 
-A static, local music workbench for [muz](../muz-core). Write source, run it in
-WebAssembly, and inspect the performed music while it plays. Black on white is
-the default; the theme switch also updates the editor, arrangement, graphs, and
-audio displays. Interface text uses proportional fonts; monospace is confined to
-source code.
+A local music workbench for [muz](../muz-core), with a static browser application
+and a Linux-first Tauri 2 desktop application sharing the same editor and
+inspection interface. The browser uses WebAssembly and Web Audio; desktop owns a
+native muz-core engine child and never silently falls back to WASM. Write source,
+rebuild, and inspect performed music while it plays. Settings offers Light, Dark,
+Soft light, and Soft dark palettes. Interface text uses proportional fonts;
+monospace is confined to source code.
 
 ## Run locally
 
@@ -18,9 +20,9 @@ npm run prepare:engine
 npm run dev
 ```
 
-Open the URL printed by Vite. Choose Still Our Own from the Gists sidebar to
-load its source from GitHub, or start with the new project. Imported gists compile
-locally on opening; press Play to enable browser audio. Every project open or reload
+Open the URL printed by Vite. Start with the new project, use **Open gist** to
+load source from GitHub, or choose a Gists sidebar link when configured.
+Imported gists compile locally on opening; press Play to enable browser audio. Every project open or reload
 automatically builds, including local folders, ZIPs, new projects, and recovered drafts. Rebuild, or Cmd/Ctrl+Enter in the editor, accepts a new source
 revision. Invalid edits retain the previous accepted session. Compatible edits
 retain the rendering engine, held voices and matching processor state; structural
@@ -33,35 +35,80 @@ changes use the engine's reconciliation decisions and cutover fades.
   relative links to included documents and source files opening in the workbench.
 - Open a local folder or project ZIP. Relative imports stay relative to their
   declaring module. Muz source, Markdown documentation, muzpad metadata, and
-  project-relative MIDI, WAV, and FLAC assets are imported. Text and binary
-  assets remain separate in browser storage. Up to 500 source files and 4 MB of
-  text are supported; binary assets are limited to 256 files, 16 MB per file,
-  and 64 MB total.
-- The header distinguishes **Folder connected** from **Browser copy**, shows the
-  folder's unsaved-file count, and groups current-workspace actions separately
-  from opening other projects. Gist copies explicitly say that edits stay local.
-- Connect a folder in browsers with the writable directory picker. **Save to
-  folder** (Cmd/Ctrl+S) writes changed files and entry metadata back to that folder,
-  including new nested source files. Saving checks for outside edits before
-  writing; conflicts leave browser edits available for ZIP download. Folder connections last
-  for this tab session. After refreshing the page, the recovered draft is a browser copy.
-  **Reload** rereads the mounted folder, including added/deleted files and entry
-  metadata, and automatically rebuilds the selected entrypoint if its file still
-  exists, falling back to the folder's default entrypoint if it was removed.
-  Reload keeps the current file tabs, arrangement view, and transport state;
-  playback continues during rebuilding and failed builds keep the accepted audio.
-  It preserves the latest browser copy in
-  Previous workspace before replacing it. Read failures keep the current workspace.
-  Connecting again opens the current disk files; a recovered draft is clearly labeled
-  disconnected. Folder import and ZIP download remain available in browsers without mounting support.
-- Edit multiple source files, format them with muz's formatter, add files, and
-  choose the compilation entry. Bundled libraries are read only.
+  project-relative MIDI, WAV, and FLAC assets are imported. In browsers, text and
+  binary assets remain separate in storage; limits are 500 source files, 4 MB of
+  text, and 256 binary assets of at most 16 MB each and 64 MB total.
+  Native imports allow up to 8,192 tree/archive entries and 256 MiB of imported
+  assets; native source documents and captured source sets are bounded to 8 MiB
+  and 64 MiB respectively. Connected-folder assets remain authorized descriptors.
+- The header distinguishes **Folder connected** from **Browser copy** or **Native
+  working copy**, shows the folder's unsaved-file count, and groups current-workspace
+  actions separately from opening other projects. Gist copies explicitly say that edits stay local.
+- Connect a folder where the host supports writable directory access. **Save to
+  folder** (Cmd/Ctrl+S) writes changed buffers and entry metadata, including new
+  nested source files. Unsaved-to-disk and edited-since-build are separate states.
+  Saves check disk baselines before writing; a failed save never grants close.
+- **Reload** checks the connected folder, including added/deleted files. Clean
+  changes refresh their buffers; overlapping local/disk changes offer **Use disk**,
+  **Keep local**, or editable merged text. These choices change buffers without an
+  implicit disk write. Completing manual Reload's conflict choices rebuilds the
+  refreshed buffers; choosing **Later** leaves the accepted revision available.
+  The accepted revision keeps playing during refresh/rebuild. Read failures keep
+  the workspace. Browser folder grants last only for the tab session; recovered
+  browser copies are disconnected.
+  Native folder status distinguishes missing roots and degraded watches from ready
+  access; working buffers remain available, and restored watch readiness clears
+  the folder warning without hiding unrelated engine diagnostics.
+- Project replacement and desktop window close use a save/discard/cancel gate.
+  Conflicts and active export jobs can veto closure. Native recovery offers are
+  explicit; Recent projects and Reveal project use the host's authorized roots.
+  Browser draft/Previous workspace recovery remains available through the same
+  project interface. A gist URL is fetched afresh on startup, with cached local
+  changes offered as Previous rather than replacing the requested remote source.
+  The chosen recovery copy stays intact while the current project's safety gate
+  runs. Clearing browser site data removes its recovery.
+  If browser storage denies a recovery write, **Recovery unavailable** stays visible
+  separately from build status and compiler diagnostics; export a ZIP to keep edits.
+  Project replacements execute in order, including confirmed recovery requests
+  made while a prior replacement is rebuilding.
+- Edit multiple source files, format them, add files, and choose the compilation
+  entry. Bundled libraries are read only. Closing a tab closes its view, not its
+  buffer: modified closed files remain in rebuilds, saves, recovery, and archives.
+  New relative source paths may contain Unicode and spaces; traversal, absolute
+  paths, backslashes, NUL and reserved `.muzpad-` components remain rejected.
+  Active-tab closure selects its right neighbor, otherwise its left; inactive
+  closure does not switch source. Last-close shows **No file open**, with **Open
+  entrypoint** and **Show explorer**, while transport and Rebuild remain usable.
+- Tab Arrow Left/Right and Home/End activate neighboring/end tabs; Delete closes
+  the focused tab. Close buttons have full-path names and support Enter/Space.
+  Desktop Cmd/Ctrl+W closes the active tab, not the window; browsers retain their
+  own Cmd/Ctrl+W behavior. Desktop Cmd/Ctrl+O opens a folder; Cmd/Ctrl+, opens Settings.
+  Desktop Cmd/Ctrl+N creates a project through the same safety gate; Cmd/Ctrl+Enter
+  rebuilds outside dialogs.
+- Editor undo/redo, selections and scroll, and Markdown scroll/details are retained
+  while closing/reopening views in a live project. Explicit source/fragment links
+  take precedence. This does not promise cross-launch undo, cursor or tab-history
+  persistence; recovery stores canonical buffers, not serialized editor history.
+- Collapse Explorer, Source, Visualization or Inspector using pane controls; the
+  always-visible **Panes** toolbar restores them, even with every pane hidden.
+  Restoring Inspector also reveals Visualization. Hidden views retain navigation,
+  zoom, selection, audition, loop and follow preferences. At narrow widths visible
+  panes stack without empty tracks. Drag or keyboard-resize the source separator
+  (arrows, Home/End); its preferred 25–70% fraction persists.
+- **Settings** applies theme and pane choices immediately. **Reset layout** restores
+  all panes and the 46% source fraction without changing music or theme. Preferences
+  live separately from projects/ZIPs/gists/recovery text, in guarded browser storage
+  or native app configuration. **Preferences are temporary** reports storage failure
+  without blocking editing or masking engine diagnostics. Keyboard focus stays
+  within Settings until it closes. Escape returns focus to its invoker or a safe
+  global control; a queued close event never takes focus back from a newly chosen control.
 - The Entrypoints chooser lists only files the compiler validates as playable entry
   points, with declared entries first. Validation refreshes after source edits.
   Changing entrypoint does not rebuild automatically. A notice names the selected
   entrypoint and the still-active one until Rebuild accepts the change.
 - Play/pause, stop, restart, seek on the ruler or by section, and loop a section
-  or an explicit beat range. Range values use zero-based musical beats.
+  or an explicit beat range. Range values use zero-based musical beats. **Panic**
+  releases sounding voices through the host's acknowledged transport operation.
 - Use **M** and **S** beside arrangement tracks to mute or solo temporarily.
   Multiple solos combine; mute takes precedence. Kit-group buttons act on their
   explicit lanes (a dashed button means some lanes are enabled). Controls survive
@@ -73,19 +120,24 @@ changes use the engine's reconciliation decisions and cutover fades.
 - Inspect arrangement notes, note performance data, routing, native voice graphs,
   automation curves, master/track peak meters, and output waveform/spectrum.
 - Select a track to analyze its output, or choose Master in the analysis menu.
-  The analysis signal is separate from the audible mix. Collapse the inspector
-  to give the arrangement more room. Contrib folders show sample and plugin
-  requirements; native plugins remain unavailable, while supported sample files
-  must be supplied as project assets.
+  The analysis signal is separate from the audible mix. Hiding Inspector does not
+  hide analysis; hiding Visualization suspends detailed capture/drawing. Contrib
+  folders show sample/plugin requirements. Browser hosts cannot run native plugins;
+  native hosts report supported formats and use installed authorized resources.
 - Click a diagnostic or the related-source action to navigate to a declaration.
   Source attribution is best effort for generated material. Graph links refer
   to the accepted revision; unsaved edits can move those source lines.
+  Native absolute source identities resolve through the host to existing editable
+  project buffers or already-authorized read-only library documents. Diagnostic,
+  graph and note-provenance navigation does not infer a file from its basename or
+  grant new filesystem access; read-only documents keep their identity on reopen.
 - Import a gist URL or ID. The page URL gains `?gist=ID` so it can be shared;
   `?gist=ID/REVISION` pins a particular version. A gist workspace has a **View gist**
-  link in place of the project download button. Edits stay in browser storage and
-  are not published back to GitHub or included in a shared link. Opening or reloading
-  a `?gist=` URL always fetches its source from GitHub, even for the same gist or
-  pinned revision. Saved browser edits remain available in Previous workspace.
+  link in place of the project download button. Edits remain local and are not
+  published to GitHub or included in a shared URL. Opening a `?gist=` URL fetches
+  GitHub source, even for the same gist or pinned revision. Replacement safety
+  applies to edited buffers. Desktop HTTP(S) links open explicitly in the OS browser;
+  Markdown does not grant filesystem access or navigate the privileged webview.
 - **Export audio / MIDI** exports the accepted revision, with a reminder to rebuild
   when the editor has newer changes. **Download master WAV** bounces the full written
   mix and project effect tail to stereo 48 kHz / 24-bit PCM in one click. Temporary
@@ -94,8 +146,9 @@ changes use the engine's reconciliation decisions and cutover fades.
   16/24-bit PCM, and a range in seconds (including the project tail). Selected tracks
   run through buses and master effects; isolating tracks can change shared dynamics
   and sidechains. Rendering includes the lead-in before trimming to preserve effect
-  history and sustained notes, and compensates engine latency. Files are limited to
-  256 MB; clipping is reported after download.
+  history and sustained notes, and compensates engine latency. Browser WAV output
+  is limited to 256 MB and reports clipping after download. Native exports enforce
+  their advertised host budgets and reject clipping before publishing output.
 - MIDI export produces a type-1 `.mid` file with one named track per selected
   musical track and a conductor track containing tempo and meter. Performed note
   timing, velocity, controllers and channel messages are retained at 960 PPQ;
@@ -104,19 +157,21 @@ changes use the engine's reconciliation decisions and cutover fades.
   Sampled tracks export their trigger notes, not a transcription of the sample.
   Export runs separately from playback, reports progress, and can be cancelled.
 - Download folder/ZIP/new projects as ZIPs, including their unchanged binary
-  assets. Asset-bearing drafts and Previous workspace use IndexedDB with a small
-  localStorage marker; text-only drafts retain the legacy localStorage format.
-  Local draft recovery uses browser storage; clearing site data removes
-  drafts. Previous workspace restores the preceding project when switching
-  projects. Gist links are source-only and cannot carry asset dependencies; use
+  assets. In browsers, asset-bearing drafts and Previous workspace use IndexedDB
+  with a small localStorage marker; text-only drafts retain the legacy localStorage
+  format. Clearing browser site data removes browser drafts. Native recovery is
+  owned by the parent application in its app-data directory, not browser storage.
+  Previous workspace offers restoration of the preceding project.
+  Gist links are source-only and cannot carry asset dependencies; use
   a project ZIP for a piece that depends on binary assets.
 
 Visualizations are read only. Selecting notes or graph objects does not edit the
 music. Scope and spectrum show actual selected output; note marks show compiled
-performance, not measured audio. Analysis is mono downmixed by Web Audio; track
-analysis and meters measure output before routing to buses. Switching analysis
-briefly clears the display while queued audio drains, without restarting playback
-or changing the audible mix.
+performance, not measured audio. Analysis uses actual mono-downmixed output;
+track analysis and meters measure output before routing to buses. Switching
+analysis clears old capture without restarting playback or changing the audible
+mix. Paused meters clear; no synthetic native waveform or silent-clock fallback
+stands in for unavailable audio.
 
 Kit tracks appear as collapsible groups with compact named voice lanes. At close
 zoom, diamonds mark performed hit onsets; size and shade show attack velocity.
@@ -196,16 +251,123 @@ npm run deploy -- --dry-run    # build locally without publishing
 The muz-core sidebar shows bundled source files without an external GitHub link.
 `dist/engine-build.json` records the engine commit, clean state, and WASM SHA-256.
 
+## Native desktop
+
+The native shell uses Tauri 2 and an owned `muzpad-engine` child. Only the bundled
+webview can invoke native commands; remote navigation and new webview windows are
+denied. File/dialog grants, dirty buffers, disk-conflict handling, recovery and
+preferences live in the parent, not the audio child. Engine failure interrupts
+audio but leaves buffers recoverable. **Restart engine** explicitly creates a new
+engine epoch and rebuilds its retained source snapshot; stale runtime handles are
+not reused. A compile becomes accepted only after the audio callback acknowledges
+the prepared revision.
+The webview retains at most four identity/version-only source captures, matching
+the parent’s capture window; repeated entry scans do not retain historical file
+arrays. Current/previous accepted captures and in-flight rebuild ownership remain
+explicit, and expired captures cannot be reused.
+
+CLAP and VST3 plugins are trusted native code with engine-process privileges,
+not individually sandboxed plugins. A plugin crash/hang can terminate the whole
+child. The child is not an OS filesystem sandbox: grants constrain host
+loaders/resolvers, not arbitrary system calls by trusted plugins. Parent/child
+separation contains ordinary engine crashes, not malicious native code.
+Native exports pin the accepted revision and its resources, not newer
+working edits or listening mute/solo controls. Missing, changed or unpinnable
+resources fail explicitly. Plugin renders are not promised bit-identical across
+future runs. Archives use working text/settings and project-owned assets; linked
+libraries and plugin installations are not silently embedded.
+
+Native development requires Rust/Cargo, C/C++ tools, Node/npm, the
+`wasm32-unknown-unknown` target for shared frontend assets, GTK3/WebKitGTK 4.1
+development libraries, and PipeWire/native-audio development libraries.
+`npm ci` installs the locked Tauri CLI. Runtime needs GTK3/WebKitGTK 4.1, PipeWire,
+and `xdg-utils` for external links. No tray/appindicator dependency or automatic
+system-package installation is required.
+**Reveal project** also requires the `gdbus` command and a session file manager
+implementing `org.freedesktop.FileManager1`; missing, failed or hanging integration
+returns an explicit error. Reveal does not open files through generic type associations.
+
+```sh
+npm run desktop:dev                      # debug engine, trusted production UI, shell
+npm run desktop:build                    # release shell without installers
+npm run desktop:package -- --bundles deb # local DEB installer
+npm run desktop:package                  # configured DEB and AppImage installers
+npm run desktop:release -- --bundles deb # local artifacts/provenance, never upload
+```
+
+Desktop development uses the bundled production frontend, not a Vite/Tauri HTTP
+server. The independent static browser commands remain unchanged.
+`desktop:prepare` stages the release child and library (`-- --debug` selects debug);
+`desktop:resources` stages only the library/catalog. Desktop commands accept
+`--target <Rust Linux triple>` and honor `CARGO_BUILD_TARGET`/`CARGO_TARGET_DIR`.
+Native Cargo builds use their independent lockfile with `--locked`.
+
+The configured core source must match both Cargo dependencies and the authoritative
+pin in `src-tauri/core-revision`; do not substitute a different revision.
+Native source/config must match the pin; noncompiled local `docs/` edits may remain.
+Packaged library bytes come from the committed Git tree, never those local edits.
+Optional `MUZPAD_CORE_REVISION` must match the pin, which both native executables
+embed. Installed applications need neither a sibling checkout nor Node/npm or a
+development server.
+
+Default native output is under `src-tauri/target/{debug,release}`, with a target
+triple subdirectory when explicitly selected; installers are in the profile's
+`bundle/`. Local release artifacts are copied to `.artifacts/desktop/<triple>/`
+(configurable), with checksums and provenance in `SHA256SUMS` and `release.json`.
+Those files record inputs and artifacts, not an acceptance certificate.
+
+Staging includes only tracked redistributable contrib source, JSON/config/docs,
+core README/license, std documents and examples, retaining relative paths.
+The standard library remains embedded. Downloaded sample libraries, plugin
+binaries, licensed presets, untracked user files and caches are excluded.
+Plugin configuration (`MUZ_PLUGIN_CONFIG`, or the core's XDG/HOME default) and
+external resources remain user-owned. Installed `MUZ_CONTRIB_DIR` and XDG data
+contrib roots receive explicit read grants for module-relative assets; bundled
+modules provide offline fallback, not missing sample/plugin installations.
+
+See [the native host implementation reference](docs/desktop-host.md) for resource
+and safety boundaries. The production x86_64 DEB was independently extracted and
+launched offline, with both source checkouts hidden and no development server.
+Bundled README/std documents, native rebuild, save on safe quit, same-profile
+relaunch and reopening the saved project worked. This is extracted-package
+acceptance on the baseline below, not Debian apt/dpkg installation certification
+or AppImage/older-distribution acceptance.
+
+The tested native Linux baseline is x86_64 CachyOS rolling (Arch-like), glibc 2.44,
+WebKitGTK 2.52.6, GTK 3.24.52, and PipeWire 1.6.9. Actual native output used
+48 kHz stereo with a 256-frame period (about 5.33 ms per period); this is not
+physical roundtrip latency or an audible-listening measurement. It does not
+establish compatibility with older distributions or library versions.
+
+On that baseline, the observed DEB was 10,643,306 bytes (about 10.15 MiB).
+Launcher-to-ready-workbench frames took 2.368 s for a fresh profile and 2.762 s
+for the same-profile relaunch; “cold” did not mean dropped OS caches. A changed-note
+pointer Rebuild reached a distinct accepted-revision frame in 2.123 s, including
+framebuffer/OCR sampling overhead: a workflow upper-bound observation, not pure
+compiler/apply or acoustic latency. One separate idle launch using the existing
+isolated profile (empty Untitled workbench, no playback/exports) measured the shell,
+WebKit network/web processes and engine through sequential Linux `smaps_rollup`
+reads: 707.96 MiB summed RSS, 338.31 MiB proportional set size (PSS), and
+258.76 MiB private memory (`Private_Clean + Private_Dirty + Private_Hugetlb`).
+PSS apportions shared pages; summed RSS counts them separately in each process.
+The earlier fresh-profile RSS sample was 738.6 MiB, from a different launch.
+These are measured baseline samples, not a memory-light claim or performance
+guarantee.
+
 ## Runtime
 
-The compiler and rendering workers each instantiate the same WASM library.
+In the browser host, compiler and rendering workers instantiate the same WASM library.
 Compilation returns a revision summary and a checked playable snapshot. Detailed
 graph, arrangement, patch, automation, diagnostic, source-location, provenance,
 and revision-difference data is requested afterward in revision-checked pages of
 at most 1,000 rows and 1 MiB. The arrangement requests only its visible time
 range and discards old ranges from its bounded cache. Patch and automation detail
-is loaded only when its view opens. Stale pages are rejected rather than being
-shown for a newer accepted revision.
+is loaded only when its view opens. Accepted revision changes discard the previous
+detail DOM before loading its replacement, keeping transport animation bound to
+the displayed revision's automation data. Stale pages are rejected rather than
+being shown for a newer accepted revision.
+Build phase notifications use captured source metadata without decoding assets
+again; asset bytes are decoded at the actual compiler/audio transfer boundary.
 
 A retained rendering worker prepares then applies candidates between render
 blocks, checking request, base revision and transport generation. The compiler
@@ -213,8 +375,10 @@ marks a candidate accepted only after the apply acknowledgement; rejected or
 discarded preparation retains the previous engine and inspectable revision.
 Cancellation can wait for a synchronous WASM preparation to return, but cancelled
 preparations cannot commit. Cancellation closes once apply is submitted, until
-the accepted UI revision is published. Fatal recovery replaces the worker and reports lost
-continuity. Compiler requests have a 30-second timeout. Note inspection distinguishes its authored definition, latest
+the accepted UI revision is published. Fatal worker failures are surfaced without
+silently replacing the engine; explicit **Restart engine** starts a fresh engine
+epoch and rebuilds the pinned accepted sources, not newer working edits.
+Compiler requests have a 30-second timeout. Note inspection distinguishes its authored definition, latest
 relevant edit, and occurrence context when provenance is available, and reports
 fallback quality explicitly for imported assets.
 
@@ -230,13 +394,14 @@ queue holds at most about half a second at 48 kHz; initial playback primes rough
 
 ## Current limits
 
-Desktop browsers are the initial target. Native VST3/CLAP plugins are unavailable.
-Local MIDI, WAV, and FLAC files can be stored with a project and supplied to the
-portable engine. Other asset formats and native plugin dependencies remain
-unavailable. There is no recording or note/automation/patch editing. Structural
-preparation is synchronous on the rendering worker and may exhaust queued audio.
-Large or expensive programs can exceed browser memory/CPU budgets;
-the UI reports audio underruns rather than claiming glitch-free playback.
+The desktop implementation targets Linux first; other native platforms and
+packaging baselines require separate verification. Browser hosts cannot load
+VST3/CLAP plugins. MIDI/WAV/FLAC project assets are portable; native linked sample
+and plugin resources depend on the installed configuration and advertised
+capabilities. There is no recording or note/automation/patch editing.
+Browser structural preparation is synchronous on its rendering worker and can
+exhaust queued audio. Expensive programs can exceed host memory/CPU budgets;
+reported health and explicit errors are not a glitch-free playback guarantee.
 
 The first timing check through the WASM bridge compiled Still Our Own in roughly
 0.2 seconds, prepared it in 0.05 seconds, and rendered a 5.3-second chorus passage
@@ -258,6 +423,14 @@ editing, imports/exports, transport, source navigation, recovery, themes, nested
 libraries and output analysis in Chromium, Firefox and WebKit. The mount test
 uses real Chromium browser file handles with a substituted OS folder picker to
 exercise writes, new nested files, and external-edit conflicts.
+Shared UI coverage additionally exercises tab neighbor/last-close semantics,
+closed-buffer export/recovery, editor/document retention, stale Format guards,
+pane/focus/ARIA behavior, responsive and short-height geometry, splitter
+persistence, four-theme computed contrast (including canvas token/background
+pairs), denied preference storage, migration and newest-wins saves.
+Native acceptance is separate and must exercise the actual Linux application,
+native preferences relaunch, save/conflict/close/recovery, engine failure/restart,
+analysis and export. Browser screenshots alone do not establish native acceptance.
 Set `CHROMIUM_PATH` to use an existing Chromium executable. Engine embedding tests
 live in muz-core and use small independent cases. Still Our Own is a manual
 integration piece, not a frozen regression fixture.

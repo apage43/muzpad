@@ -62,6 +62,7 @@ test("URL gist fetches updated source on reload and keeps local edits in Previou
   await expect(page.locator(".cm-content")).not.toContainText("local edit");
   expect(requests).toBe(2);
   await page.getByRole("button", { name: "Previous workspace" }).click();
+  await page.locator("#workflow-dialog").getByRole("button", { name: "Restore", exact: true }).click();
   await expect(page.locator(".cm-content")).toContainText("local edit");
   // Visiting without a gist parameter still recovers the local draft.
   await page.goto("./");
@@ -69,10 +70,12 @@ test("URL gist fetches updated source on reload and keeps local edits in Previou
   await expect(page.locator(".cm-content")).toContainText("local edit");
   expect(requests).toBe(2);
   await page.locator("#new-project").click();
+  await page.locator("#workflow-dialog").getByRole("button", { name: "Discard", exact: true }).click();
   await expect(page).not.toHaveURL(/gist=/);
   await expect(page.locator("#download")).toBeVisible();
   await expect(page.locator("#view-gist")).toBeHidden();
   await page.getByRole("button", { name: "Previous workspace" }).click();
+  await page.locator("#workflow-dialog").getByRole("button", { name: "Restore", exact: true }).click();
   await expect(page).toHaveURL(new RegExp(`gist=${id}`));
   await expect(page.locator(".cm-content")).toContainText("local edit");
 });
@@ -134,6 +137,7 @@ test("a failed URL gist request never falls back to the matching cached draft", 
   );
   await expect(page.locator("#play")).toBeDisabled();
   await page.getByRole("button", { name: "Previous workspace" }).click();
+  await page.locator("#workflow-dialog").getByRole("button", { name: "Restore", exact: true }).click();
   await expect(page.locator(".cm-content")).toContainText("cached local edits");
 });
 test("gist import errors preserve work; sidebar links open gists and show the active piece", async ({

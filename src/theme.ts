@@ -1,30 +1,41 @@
-export type Theme = "light" | "dark";
+import type { ThemeId } from "./host/contracts";
+
 const cache = new Map<string, string>();
-export function currentTheme(): Theme {
-  return document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+
+export function currentTheme(): ThemeId {
+  const theme = document.documentElement.dataset.theme;
+  return theme === "dark" || theme === "soft-light" || theme === "soft-dark"
+    ? theme
+    : "light";
 }
-export function setTheme(theme: Theme) {
-  document.documentElement.dataset.theme = theme;
+
+export function isDarkTheme(theme: string | undefined = currentTheme()): boolean {
+  return theme === "dark" || theme === "soft-dark";
+}
+
+export function setTheme(theme: ThemeId): void {
+  const root = document.documentElement;
+  root.dataset.theme = theme;
+  root.style.colorScheme = isDarkTheme(theme) ? "dark" : "light";
+  cache.clear();
   document
     .querySelector('meta[name="theme-color"]')
-    ?.setAttribute("content", theme === "dark" ? "#080808" : "#ffffff");
-  cache.clear();
-  try {
-    localStorage.setItem("muzpad-theme", theme);
-  } catch {}
+    ?.setAttribute("content", color("#080808"));
 }
-export function color(hex: string) {
-  if (!cache.has(hex))
+/** Resolve a legacy hex token or a semantic CSS token for canvas rendering. */
+export function color(token: string): string {
+  if (!cache.has(token)) {
+    const property = token.startsWith("#")
+      ? "--c-" + token.slice(1)
+      : token.startsWith("--")
+        ? token
+        : "--" + token;
     cache.set(
-      hex,
+      token,
       getComputedStyle(document.documentElement)
-        .getPropertyValue("--c-" + hex.slice(1))
-        .trim() || hex,
+        .getPropertyValue(property)
+        .trim() || token,
     );
-  return cache.get(hex)!;
+  }
+  return cache.get(token)!;
 }
-let initial: Theme = "light";
-try {
-  if (localStorage.getItem("muzpad-theme") === "dark") initial = "dark";
-} catch {}
-setTheme(initial);

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "muzpad",
+  "version": "0.1.0",
+  "identifier": "org.muz.muzpad",
+  "build": { "frontendDist": "../dist", "beforeDevCommand": "npm run build", "beforeBuildCommand": "npm run build" },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost https://api.github.com https://gist.githubusercontent.com; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'",
+      "capabilities": ["workbench"]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["deb", "appimage"],
+    "icon": ["icons/icon.png"],
+    "externalBin": ["binaries/muzpad-engine"],
+    "resources": { "resources/library/": "library/" },
+    "linux": { "deb": { "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0", "libpipewire-0.3-0", "libglib2.0-bin", "xdg-utils"] } }
+  }
+}

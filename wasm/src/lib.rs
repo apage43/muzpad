@@ -105,6 +105,7 @@ impl Host {
             .as_ref()
             .into_iter()
             .chain(self.accepted.as_ref())
+            .chain(self.previous.as_ref())
             .find(|(r, _)| *r == revision)
             .map(|(_, c)| c)
             .ok_or_else(|| anyhow::anyhow!("stale inspection revision {revision}"))
@@ -236,7 +237,6 @@ impl Host {
                         ))
                     })
                     .transpose()?;
-                self.previous = None;
                 self.candidate = Some((self.compile_revision, c));
                 Ok(
                     json!({"revision":self.compile_revision,"snapshot":snapshot,"summary":summary,"effect":effect}),
@@ -446,6 +446,14 @@ impl Host {
                 Ok(json!({"muted":self.muted,"solo":self.solo}))
             }
             "status" => self.status(),
+            "panic" => {
+                self.engine
+                    .as_mut()
+                    .ok_or_else(|| anyhow::anyhow!("rebuild a project first"))?
+                    .panic();
+                self.generation += 1;
+                self.status()
+            }
             "seek" => {
                 let beat = v["beat"].as_f64().unwrap_or(0.0);
                 ensure!(beat.is_finite() && beat >= 0.0, "invalid seek position");
@@ -503,19 +511,21 @@ impl Host {
                 };
                 e.render_interleaved_with_fade(&mut self.pcm[..frames * 2], 2, fade)?;
                 self.analysis[..frames * 2].fill(0.0);
-                if let Some(id) = v["analysis"].as_str() {
-                    for i in 0..e.track_count() {
-                        let (track, left, right, _) = e.track_audio(i);
-                        if track == id {
-                            for frame in 0..frames {
-                                self.analysis[frame * 2] = left[frame];
-                                self.analysis[frame * 2 + 1] = right[frame];
+                if v["analysis_enabled"].as_bool().unwrap_or(true) {
+                    if let Some(id) = v["analysis"].as_str() {
+                        for i in 0..e.track_count() {
+                            let (track, left, right, _) = e.track_audio(i);
+                            if track == id {
+                                for frame in 0..frames {
+                                    self.analysis[frame * 2] = left[frame];
+                                    self.analysis[frame * 2 + 1] = right[frame];
+                                }
+                                break;
                             }
-                            break;
                         }
+                    } else {
+                        self.analysis[..frames * 2].copy_from_slice(&self.pcm[..frames * 2]);
                     }
-                } else {
-                    self.analysis[..frames * 2].copy_from_slice(&self.pcm[..frames * 2]);
                 }
                 if e.status().ended {
                     self.ended_frames += frames as u64;
@@ -527,7 +537,10 @@ impl Host {
                             .iter()
                             .chain(&r[..frames])
                             .fold(0.0_f32, |a, b| a.max(b.abs()));
-                        json!({"id": id, "peak": peak})
+                        let rms = (l[..frames].iter().chain(&r[..frames])
+                            .map(|sample| sample * sample).sum::<f32>()
+                            / (frames * 2) as f32).sqrt();
+                        json!({"id": id, "peak": peak, "rms": rms})
                     })
                     .collect();
                 Ok(

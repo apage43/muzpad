@@ -1,92 +1,79 @@
-# TypeScript host adapters: remaining work
+# Workbench host adapters
 
-Owner/file boundaries: [desktop-direction.md](desktop-direction.md). Exact DTOs,
-command/event spellings and exports: `local://desktop-frozen-contract.md`. Implement
-`src/host/{contracts,index,web,desktop}.ts`; do not edit shared main/style/editor/
-theme/preferences/views/document/README. Deliver callable seams to that owner.
+The shared TypeScript boundary is `src/host/contracts.ts`. The native parent and
+engine contracts are described in [Desktop host](desktop-host.md); reusable core
+embedding APIs are documented in the core's `docs/embedding.md`.
 
-## Shared boundary and web cutover
 
-- Declare WorkbenchHost/WorkbenchRuntime/ProjectStore/PreferencesStore once in
-  contracts.ts. Explicitly choose trusted native bridge or web at bootstrap;
-  native handshake failure reports native failure, never falls back to WASM.
-  Expose actual capabilities/reasons, identities and negotiated limits, not a
-  backend registry. Keep browser builds free of mandatory native dependencies.
-- Move existing Compiler/AudioPlayer/worker/asset orchestration behind web.ts,
-  including immutable all-buffer snapshots, entry checks, exact-source formatting,
-  compile/prepare/apply/accept, cancellation and snapshot retention. No caller may
-  continue the old prepare/accept_compilation choreography. Rebuild resolves only
-  on real apply; prefetch bounded initial summary/graph/sections/track_groups/
-  locations/diagnostics before mutation, preserve continuations and last accepted
-  inspection/audio on failure. Human sourceVersion remains distinct from opaque
-  engine revision; source entry changes do not relabel accepted playback.
-- Adapt InspectionClient to typed runtime+RevisionRef with its eight-page bounded
-  cache. Support all core views/filters, explanation key ambiguity, source locations
-  and all diff categories with explicit comparison base; reject stale/expired
-  identities. Retain current graph/performance projections and UTF-16 editor
-  conversion; do not create a second inspector or materialize unlimited pages.
-- Expose transport play/pause/stop/restart/seek/loop/panic through one contract:
-  pause holds position, stop pauses and rewinds to loop-start/zero, restart preserves
-  running state, play at end restarts, finite nonnegative beats, half-open loops,
-  enabling seeks start, disabling retains position, invalidated shortened loops
-  clear. Track acknowledged transport generation. Physical mute/solo resolves kit
-  groups with mute precedence, no source rebuild; selection independent of audio.
-- Bridge bounded master/per-track meters, nondestructive master/selected waveform/
-  spectrum and health/status to shared events. Stop unused detailed capture while
-  hidden, clear paused meters, retain current drawing semantics, observe drops.
-  Browser PCM stays in existing browser engine/workers/worklet only.
-- Refactor ProjectExporter around runtime.export and AcceptedRevision metadata;
-  export the frozen constructor/set/open/close seam for UI. Keep current dialog,
-  track selection, absolute seconds/rate/PCM depth, progress/cancel, master written
-  mix and MIDI conductor/channel semantics. Web adapter owns snapshot/assets,
-  worker/download and clipping warnings. Never expose snapshots in main/UI.
+The single public boundary is `src/host/contracts.ts`; bootstrap calls
+`createWorkbenchHost()` from `src/host/index.ts`. Native bridge presence selects
+the desktop adapter irrevocably: handshake errors are surfaced, never routed to
+the browser engine. Identity fields remain opaque strings and native tick/
+generation counters remain canonical decimal strings.
 
-## Native adapter and project parity
+`InspectionClient(runtime, ref)` retains at most eight bounded pages and checks
+the complete revision identity. `ProjectExporter(runtime)` receives only accepted
+revision metadata and delegates render/publication/cancellation to the runtime;
+neither UI seam handles playable snapshots, native paths or sample bytes.
 
-- Transcribe the frozen typed Tauri commands/envelopes; correlate request IDs,
-  project epoch, engine epoch, sourceVersion, accepted revision and transport
-  generation before delivery. Bounded reliable outcomes differ from coalesced
-  telemetry. AbortSignal sends request-scoped cancellation; applying is the commit
-  boundary, so reconcile late abort with authoritative applied/not-applied response.
-  Native calls never route through web compiler/audio/assets or text CLI.
-- Chunk source/import/archive transfer without exceeding encoded frame ceilings;
-  source capture includes every canonical edited/new/deleted/closed buffer, exact
-  clean baselines and entry at one sourceVersion. Return parent immutable snapshot
-  handle; no child disk substitution. Project native paths/grants remain opaque.
-- Implement all ProjectStore operations: chooseFolder/openRecent/listRecent,
-  newProject/importProject/readLibraryDocument, save/refresh/resolveConflict,
-  snapshotSources/persistRecovery/restoreRecovery/exportArchive/reveal,
-  prepareClose/close/subscribe. Preserve web folder/import/ZIP/gist/previous/draft
-  semantics and asset storage compatibility; never copy native libraries into
-  IndexedDB/base64. Archive current working project/settings/project-owned assets,
-  excluding preferences and explicitly disclosing linked native resources.
-- Apply native parent events for clean refresh/unbuilt state, dirty conflicts,
-  deletion/rename/root/permission/watch failure, exact own-save fingerprints and
-  stable recents/recovery identities. Save returns per-file captured-version
-  successes/errors; edits typed while saving remain dirty, partial success is not
-  all-or-nothing. Settings baseline is conflict checked too. Buffers survive view
-  closure and engine crash. Library/authorized external source identity cannot
-  alias a same-basename project path.
-- Expose host engine restart only as explicit recovery with fresh epoch and
-  parent-held snapshot; invalidate accepted/export/inspection handles after death.
-  Listen to parent close handshake and preserve buffers until allowed teardown.
-  Keep native URL opening HTTP(S)-only and project reveal identity-authorized.
+The browser runtime privately owns compiler/render/export workers, captured
+project source/asset pins, accepted/previous inspection revisions, the audio apply
+boundary, transport acknowledgement and bounded status/analysis sampling.
+Rebuild cancellation is checked before application; a cancellation arriving at
+the apply boundary still returns the authoritative accepted outcome. Explicit
+restart creates a fresh engine epoch and rebuilds the pinned accepted source,
+without relabelling later working edits as accepted. Browser worker failures do
+not silently start replacement engines.
+Audio application through accepted-metadata publication is serialized with
+transport, audition and analysis controls. Queued controls revalidate their
+revision after acquiring that boundary, before mutating the audio engine.
 
-## Preferences and focused tests
+Browser preferences use guarded `muzpad-preferences-v1` storage with an in-memory
+session copy; legacy keys are removed only after the new record is written.
+Denied or unavailable storage rejects each save as well as reporting the failure,
+so the UI cannot clear its temporary-settings warning on an in-memory-only save.
+Browser folder refresh/save conflict checks and recovery remain project-store
+responsibilities. Native preferences/projects/exports instead use typed parent
+commands, with bounded source uploads and immutable large-reply transfers.
 
-- Web PreferencesStore uses guarded `muzpad-preferences-v1`; only when no usable
-  versioned record exists, migrate valid `muzpad-theme` and `muzpad-inspector`
-  into defaults. Remove old keys only after successful new save; denied storage
-  gives usable in-memory state plus actionable failure. UI owns normalization,
-  serialized application and temporary-settings presentation; do not leave legacy
-  independent theme/inspector storage paths. Native store delegates atomic config
-  commands, not localStorage or project files.
-- Add boundary tests for parity method coverage, stale project/engine/transport
-  identities, abort-before/after-apply outcomes, queue/size limits, retained previous
-  inspection, export pinned accepted revision, chunk framing and partial saves.
-  Retain existing engine/audio-player/render-worker/worklet/inspection/export/
-  audition/assets/project-storage/gist/arrangement/catalog tests. Add adapter
-  tests without substituting them for real native acceptance. Do not run checks
-  mid-flight; hand commands/scenarios to integration owner.
-- Update affected existing code/API documentation and prune this plan in each
-  implementation commit. Send README-visible usage changes to its UI owner.
+The browser project store replays the resumed draft and Previous recovery offers
+synchronously to new subscribers. Its internal runtime hooks authorize captured
+sources immediately before audio apply, pin accepted/export sources independently,
+and retire the old runtime only after a replacement is validated. A cancelled
+chooser leaves both workspace and playback intact. A successful replacement
+stops old playback before returning; it does not silently recover failed workers.
+Folder saves report captured-version successes per file, so later edits remain
+dirty. Refresh is manual, and browser filesystem APIs cannot provide an atomic
+compare-and-swap against an external editor between the final check and write.
+If a newer local edit races a clean disk refresh, recapture preserves its older
+disk baseline and publishes a source conflict rather than rejecting recovery
+forever or silently rebasing the edit. Recovery and working-copy archives remain
+available; unresolved conflicts block affected saves and new builds until explicit
+resolution. A bounded previous baseline supplies the common text when available.
+
+Native bridge bootstrap registers its event listener first, then hydrates a
+possibly transferred current project before replay. Native save context uses the
+latest acknowledged working capture; callers persist their current recovery
+capture before saving. Oversized bootstrap projects use the same immutable
+transfer descriptor as other large replies, with a null-project bootstrap context.
+Replacement close tokens consume permission without clearing the current desktop
+identity; canceled choosers retain playback and source-snapshot handles. Protocol
+v1 inline requests must fit both the encoded frame and the parent's 16 KiB
+envelope reserve; payloads crossing either boundary use chunked uploads.
+
+## Source navigation and retained captures
+
+`ProjectStore.resolveSourceDocument({project, path}, operation)` returns a
+canonical editable project-file identity, an authorized readonly document, or
+null. It never widens read grants or guesses project files by basename.
+Diagnostic, graph and note-explanation consumers use this same boundary.
+External readonly documents retain host library identity for lossless close/reopen
+without becoming editable project files or core catalog entries.
+
+The desktop adapter retains at most four source captures as identity/version
+metadata, not copied file arrays. Current/previous accepted pins and active
+requests govern eviction; late replies cannot revive expired project captures.
+Web builds retain asset ownership across preparing/queued/accepted phases without
+redundant phase-transition decoding. Working recovery persistence warnings remain
+separate from accepted build state and structured compiler diagnostics.
+

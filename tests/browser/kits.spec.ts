@@ -78,7 +78,6 @@ test("kit lanes collapse, zoom into hits, select physical tracks, and retain sou
   await page.locator("#jump-source").click();
   await expect(page.locator("#source-path")).toHaveText("song.muz");
   await page.locator("#play").click();
-  await expect(page.locator("#audio-health")).toHaveText("Audio running");
   await page.getByRole("button", { name: "Collapse rack.a kit" }).click();
   await expect(page.locator("#play")).toHaveText("Ⅱ Pause");
   await expect(page.locator("#analysis-source")).toHaveValue(

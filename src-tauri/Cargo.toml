@@ -1,0 +1,55 @@
+[package]
+name = "muzpad-desktop"
+version = "0.1.0"
+edition = "2024"
+default-run = "muzpad"
+build = "build.rs"
+
+[workspace]
+
+[features]
+default = ["shell"]
+shell = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-single-instance"]
+
+[lib]
+name = "muzpad_desktop"
+path = "src/lib.rs"
+
+[[bin]]
+name = "muzpad"
+path = "src/main.rs"
+required-features = ["shell"]
+
+[[bin]]
+name = "muzpad-engine"
+path = "src/bin/muzpad-engine.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [], optional = true }
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+directories = "6"
+hex = "0.4"
+hound = "3.5"
+libc = "0.2"
+parking_lot = "0.12"
+muz = { path = "../../muz-core" }
+notify = "8"
+rfd = "0.15"
+rustfft = "6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tauri = { version = "2", features = [], optional = true }
+tauri-plugin-single-instance = { version = "2", optional = true }
+tempfile = "3"
+url = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"

@@ -1,7 +1,9 @@
 import {
   EditorState,
+  EditorSelection,
   Compartment,
   Prec,
+  type StateEffect,
   type Extension,
 } from "@codemirror/state";
 import { EditorView, keymap } from "@codemirror/view";
@@ -12,6 +14,7 @@ import {
   HighlightStyle,
 } from "@codemirror/language";
 import { tags } from "@lezer/highlight";
+import { isDarkTheme } from "./theme";
 
 const muz = StreamLanguage.define({
   startState: () => ({ comment: false }),
@@ -46,7 +49,7 @@ const palette = HighlightStyle.define([
   { tag: tags.keyword, color: "var(--c-ffffff)", fontWeight: "bold" },
   { tag: tags.string, color: "var(--c-dadada)" },
   { tag: tags.number, color: "var(--c-ffffff)" },
-  { tag: tags.comment, color: "var(--c-909090)", fontStyle: "italic" },
+  { tag: tags.comment, color: "var(--text-muted)", fontStyle: "italic" },
 ]);
 
 export class SourceEditor {
@@ -55,7 +58,10 @@ export class SourceEditor {
   readonly = new Compartment();
   appearance = new Compartment();
   suppress = false;
-  states = new Map<string, EditorState>();
+  states = new Map<
+    string,
+    { state: EditorState; scroll: StateEffect<unknown> }
+  >();
   path = "";
   constructor(
     parent: HTMLElement,
@@ -66,7 +72,7 @@ export class SourceEditor {
       this.appearance.of(
         EditorView.theme(
           {},
-          { dark: document.documentElement.dataset.theme === "dark" },
+          { dark: isDarkTheme(document.documentElement.dataset.theme) },
         ),
       ),
       basicSetup,
@@ -85,7 +91,7 @@ export class SourceEditor {
         ]),
       ),
       EditorView.updateListener.of((update) => {
-        if (update.docChanged && !this.suppress)
+        if (update.docChanged && this.path && !this.suppress && !update.state.readOnly)
           onChange(update.state.doc.toString());
       }),
       EditorView.theme({
@@ -106,7 +112,7 @@ export class SourceEditor {
         ".cm-gutters": {
           backgroundColor: "var(--c-080808)",
           border: "none",
-          color: "var(--c-666)",
+          color: "var(--text-muted)",
           fontFamily: "Arial, sans-serif",
           paddingRight: "8px",
         },
@@ -114,7 +120,14 @@ export class SourceEditor {
           backgroundColor: "var(--c-151515)",
         },
         "&.cm-focused .cm-selectionBackground, .cm-selectionBackground": {
-          backgroundColor: "var(--c-3a3a3a) !important",
+          backgroundColor: "var(--selection-background) !important",
+        },
+        "&.cm-focused .cm-selectionBackground": {
+          outline: "1px solid var(--focus-ring)",
+        },
+        ".cm-content ::selection": {
+          backgroundColor: "var(--selection-background)",
+          color: "var(--selection-text)",
         },
         ".cm-cursor": { borderLeftColor: "var(--c-eee)" },
         ".cm-panels, .cm-tooltip": {
@@ -123,28 +136,90 @@ export class SourceEditor {
           fontFamily: "Arial, sans-serif",
         },
         ".cm-searchMatch": {
-          backgroundColor: "var(--c-555)",
-          outline: "1px solid var(--c-bbb)",
+          backgroundColor: "var(--selection-background)",
+          outline: "1px solid var(--focus-ring)",
         },
       }),
     ];
     this.view = new EditorView({ parent, extensions: this.extensions });
   }
-  open(path: string, text: string, readOnly: boolean) {
-    this.suppress = true;
-    if (this.path) this.states.set(this.path, this.view.state);
-    const saved = this.states.get(path);
-    if (saved && saved.doc.toString() === text) this.view.setState(saved);
-    else
-      this.view.setState(
-        EditorState.create({ doc: text, extensions: this.extensions }),
-      );
-    this.path = path;
-    this.view.dispatch({
-      effects: this.readonly.reconfigure(EditorState.readOnly.of(readOnly)),
+  checkpoint() {
+    if (!this.path) return;
+    this.states.set(this.path, {
+      state: this.view.state,
+      scroll: this.view.scrollSnapshot(),
     });
-    this.setTheme(document.documentElement.dataset.theme === "dark");
-    this.suppress = false;
+  }
+  detach() {
+    this.checkpoint();
+    this.path = "";
+    this.view.dispatch({
+      effects: this.readonly.reconfigure([
+        EditorState.readOnly.of(true),
+        EditorView.editable.of(false),
+      ]),
+    });
+  }
+  clear() {
+    this.detach();
+    this.states.clear();
+    this.view.setState(
+      EditorState.create({ extensions: this.extensions }),
+    );
+    this.detach();
+    this.setTheme(isDarkTheme(document.documentElement.dataset.theme));
+  }
+  remeasure() {
+    this.view.requestMeasure();
+  }
+  open(path: string, text: string, readOnly: boolean) {
+    if (!path) {
+      this.detach();
+      return;
+    }
+    this.checkpoint();
+    this.suppress = true;
+    this.path = "";
+    try {
+      const saved = this.states.get(path);
+      const compatible = saved?.state.doc.toString() === text;
+      if (saved && !compatible) this.states.delete(path);
+      const selection = saved && !compatible
+        ? EditorSelection.create(
+            saved.state.selection.ranges.map((range) =>
+              EditorSelection.range(
+                Math.min(range.anchor, text.length),
+                Math.min(range.head, text.length),
+              ),
+            ),
+            saved.state.selection.mainIndex,
+          )
+        : undefined;
+      this.view.setState(
+        compatible && saved
+          ? saved.state
+          : EditorState.create({ doc: text, selection, extensions: this.extensions }),
+      );
+      this.view.dispatch({
+        effects: [
+          this.readonly.reconfigure([
+            EditorState.readOnly.of(readOnly),
+            EditorView.editable.of(!readOnly),
+          ]),
+          this.appearance.reconfigure(
+            EditorView.theme({}, {
+              dark: isDarkTheme(document.documentElement.dataset.theme),
+            }),
+          ),
+          compatible && saved
+            ? saved.scroll
+            : EditorView.scrollIntoView(this.view.state.selection.main.head),
+        ],
+      });
+      this.path = path;
+    } finally {
+      this.suppress = false;
+    }
   }
   setTheme(dark: boolean) {
     this.view.dispatch({

@@ -5,7 +5,8 @@ import { parseGist } from "../src/gist.js";
 
 export async function sources(dir, prefix = "") {
   const files = {};
-  for (const entry of await readdir(dir, { withFileTypes: true })) {
+  const entries = await readdir(dir, { withFileTypes: true });
+  for (const entry of entries.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)) {
     if (
       entry.name.startsWith(".") ||
       ["assets", "out", "node_modules", "target", "dist"].includes(entry.name)
@@ -22,10 +23,10 @@ export async function sources(dir, prefix = "") {
   }
   return files;
 }
-export async function buildCatalog(configPath) {
+export async function buildCatalog(configPath, coreOverride) {
   const config = JSON.parse(await readFile(configPath, "utf8"));
   const root = dirname(configPath),
-    core = resolve(root, config.core);
+    core = coreOverride || resolve(root, config.core);
   const libraries = {
     "README.md": await readFile(resolve(core, "README.md"), "utf8"),
     ...(await sources(resolve(core, "std"), "std/")),
@@ -54,12 +55,13 @@ export async function buildCatalog(configPath) {
   }));
   return { libraries, packages, gists };
 }
-export async function writeCatalog(root) {
+export async function writeCatalog(root, engine) {
   const config = resolve(
     root,
     process.env.MUZPAD_BUILD_CONFIG || "build.config.json",
   );
-  const catalog = await buildCatalog(config);
+  const catalog = await buildCatalog(config, process.env.MUZPAD_CATALOG_CORE);
+  if (engine) catalog.engine = engine;
   await mkdir(resolve(root, "public"), { recursive: true });
   await writeFile(
     resolve(root, "public/catalog.json"),

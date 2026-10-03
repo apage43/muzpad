@@ -15,11 +15,12 @@ self.onmessage = async ({ data }) => {
     self.postMessage({ id: data.id, value: (await engine).call(data.message) });
   } catch (e: any) {
     if (e instanceof WebAssembly.RuntimeError) {
-      engine = bytes.then(createEngine);
+      engine = Promise.reject(new Error("Compiler engine failed. Restart the engine to recover."));
       void engine.catch(() => {});
     }
     self.postMessage({
       id: data.id,
+      fatal: e instanceof WebAssembly.RuntimeError,
       error: e.diagnostic ?? { message: e.message },
     });
   }

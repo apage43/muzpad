@@ -15,6 +15,7 @@ let epoch = 0,
   done = false;
 const pool: ArrayBuffer[] = [];
 let analysis: string | null = null;
+let analysisEnabled = false;
 let initialized = false;
 let pending: any;
 function emitAudio(fadeOut = false) {
@@ -22,6 +23,7 @@ function emitAudio(fadeOut = false) {
     command: "render",
     frames: 1024,
     analysis,
+    analysis_enabled: analysisEnabled,
     fade_out: fadeOut,
   });
   const audio = new Float32Array(pool.pop() ?? new ArrayBuffer(16384));
@@ -135,8 +137,16 @@ self.onmessage = ({ data }) => {
         });
       } else if (data.type === "analysis") {
         analysis = data.id;
+        analysisEnabled = data.enabled === true;
       } else if (data.type === "loop" && initialized) {
         value = engine.call({ command: "loop", range: data.range });
+      } else if (data.type === "panic" && initialized) {
+        epoch = data.epoch;
+        value = engine.call({ command: "panic" });
+        credits = 24;
+        done = false;
+        port!.postMessage({ type: "reset", epoch, status: value });
+        pump();
       } else if (data.type === "seek" && initialized) {
         epoch = data.epoch;
         engine.call({ command: "loop", range: data.range });
@@ -147,6 +157,7 @@ self.onmessage = ({ data }) => {
         done = false;
         port!.postMessage({ type: "reset", epoch, status });
         self.postMessage({ type: "seeked", epoch, status });
+        value = status;
         pump();
       }
       if (data.id !== undefined) self.postMessage({ id: data.id, value });

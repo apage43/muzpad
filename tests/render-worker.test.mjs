@@ -317,3 +317,17 @@ test("a render-time WASM trap is fatal because continuity is lost", async () => 
   const fatal = h.workerMessages.find((x) => x.type === "fatal");
   assert.match(fatal.error.message, /continuity was lost.*trap/);
 });
+
+test("seek controls return acknowledged status and detail capture is explicitly gated", async () => {
+  const h = await harness();
+  await h.send({ type: "prepare", request: 1, snapshot: {}, base_revision: 0, rate: 48000 });
+  await h.send({ type: "apply", request: 1 });
+  await h.send({ type: "seek", id: 12, epoch: 1, beat: 2, range: null });
+  assert.equal(h.workerMessages.find((message) => message.id === 12).value.generation, 1);
+  await h.runTimers();
+  assert.ok(h.calls.filter((message) => message.command === "render").every((message) => message.analysis_enabled === false));
+  await h.send({ type: "analysis", id: "lead", enabled: true });
+  h.port.onmessage({ data: { type: "credit", epoch: 1 } });
+  await h.runTimers();
+  assert.equal(h.calls.filter((message) => message.command === "render").at(-1).analysis_enabled, true);
+});

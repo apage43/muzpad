@@ -25,9 +25,12 @@ export function coreState(core) {
 export const sha256 = (bytes) =>
   createHash("sha256").update(bytes).digest("hex");
 
-export async function verifyCoreDependency(root, core) {
+export async function verifyCoreDependency(root, core, manifestPath) {
   const metadata = JSON.parse(
-    execFileSync("cargo", ["metadata", "--no-deps", "--format-version", "1"], {
+    execFileSync("cargo", [
+      "metadata", "--no-deps", "--format-version", "1",
+      ...(manifestPath ? ["--manifest-path", manifestPath] : []),
+    ], {
       cwd: root,
       encoding: "utf8",
     }),
@@ -37,6 +40,6 @@ export async function verifyCoreDependency(root, core) {
     .find((d) => d.name === "muz");
   if (!dependency?.path || (await realpath(dependency.path)) !== core)
     throw new Error(
-      "build.config.json core must match the muz dependency used by the WASM crate.",
+      "build.config.json core must match the muz dependency used by the selected Cargo crate.",
     );
 }

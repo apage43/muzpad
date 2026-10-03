@@ -27,6 +27,8 @@ export type DirectoryHandle = {
     name: string,
     options?: { create?: boolean },
   ): Promise<FileHandle>;
+  removeEntry(name: string, options?: { recursive?: boolean }): Promise<void>;
+  isSameEntry?(other: DirectoryHandle): Promise<boolean>;
   queryPermission(options: { mode: "readwrite" }): Promise<string>;
   requestPermission(options: { mode: "readwrite" }): Promise<string>;
 };
@@ -87,70 +89,4 @@ export async function readProjectFolder(root: DirectoryHandle) {
   await visit(root);
   assetTransfers(assets);
   return { files, assets };
-}
-
-// Preserve the source-only result used by the current workbench until its
-// project model adopts readProjectFolder's separate binary asset collection.
-export async function readFolder(root: DirectoryHandle) {
-  return (await readProjectFolder(root)).files;
-}
-
-export class MountedFolder {
-  baseline: Record<string, string>;
-  constructor(
-    public root: DirectoryHandle,
-    files: Record<string, string>,
-  ) {
-    this.baseline = { ...files };
-  }
-  changes(files: Record<string, string>) {
-    return Object.entries(files).filter(
-      ([path, text]) => this.baseline[path] !== text,
-    );
-  }
-  async handle(path: string, create: boolean) {
-    const parts = path.split("/");
-    if (parts.some((p) => !p || p === "." || p === ".." || p.includes("\\")))
-      throw new Error("Choose a project-relative filename.");
-    let dir = this.root;
-    for (const part of parts.slice(0, -1))
-      dir = await dir.getDirectoryHandle(part, { create });
-    return dir.getFileHandle(parts.at(-1)!, { create });
-  }
-  async save(files: Record<string, string>) {
-    const permission = { mode: "readwrite" } as const;
-    if (
-      (await this.root.queryPermission(permission)) !== "granted" &&
-      (await this.root.requestPermission(permission)) !== "granted"
-    )
-      throw new Error(
-        "Folder write access was not granted. Your edits are still in this browser; you can download the project as a ZIP.",
-      );
-    const changes = this.changes(files);
-    // Check every changed file before writing any, including newly created paths.
-    for (const [path] of changes) {
-      let disk: string | undefined;
-      try {
-        disk = await (await (await this.handle(path, false)).getFile()).text();
-      } catch (e) {
-        if ((e as Error).name !== "NotFoundError") throw e;
-      }
-      if (disk !== this.baseline[path])
-        throw new Error(
-          `${path} changed outside muzpad. Use Reload to read the disk version and keep this working copy in Previous workspace. No files were written.`,
-        );
-    }
-    for (const [path, text] of changes) {
-      const writer = await (await this.handle(path, true)).createWritable();
-      try {
-        await writer.write(text);
-        await writer.close();
-      } catch (e) {
-        await writer.abort().catch(() => {});
-        throw e;
-      }
-      this.baseline[path] = text;
-    }
-    return changes.length;
-  }
 }

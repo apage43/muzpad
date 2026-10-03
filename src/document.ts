@@ -7,6 +7,7 @@ export function renderDocument(
   path: string,
   files: Record<string, string>,
   open: (path: string, fragment: string) => void,
+  openExternal?: (url: string) => void | Promise<void>,
 ) {
   // Local projects can contain arbitrary Markdown and embedded HTML.
   container.innerHTML = DOMPurify.sanitize(
@@ -75,10 +76,47 @@ export function renderDocument(
     input.type = "checkbox";
     input.disabled = true;
   });
+  const hostLink = (link: HTMLAnchorElement, activate: () => void | Promise<void>) => {
+    // No href means context menus, modifier clicks and middle clicks cannot
+    // navigate a privileged webview around the explicit host operation.
+    link.removeAttribute("href");
+    link.setAttribute("role", "link");
+    link.tabIndex = 0;
+    const run = async (event: Event) => {
+      event.preventDefault();
+      try {
+        await activate();
+      } catch (error) {
+        link.title = `Unable to open link: ${error instanceof Error ? error.message : String(error)}`;
+      }
+    };
+    link.onclick = run;
+    link.onauxclick = (event) => {
+      event.preventDefault();
+      if (event.button === 1) void run(event);
+    };
+    link.onkeydown = (event) => {
+      if (event.key === "Enter") void run(event);
+    };
+  };
   container.querySelectorAll("a").forEach((link) => {
-    const href = link.getAttribute("href");
+    const href = link.getAttribute("href")?.trim();
     if (!href) return;
     if (/^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(href)) {
+      if (openExternal) {
+        try {
+          const target = new URL(href, "https://workspace.invalid/");
+          if (target.protocol === "https:" || target.protocol === "http:") {
+            hostLink(link, () => openExternal(target.href));
+            return;
+          }
+        } catch {
+          /* Malformed external links cannot leave the webview. */
+        }
+        link.removeAttribute("href");
+        link.title = "Only HTTP and HTTPS external links can be opened.";
+        return;
+      }
       link.target = "_blank";
       link.rel = "noopener noreferrer";
       return;
@@ -91,10 +129,13 @@ export function renderDocument(
         `${resolved.replace(/\/$/, "")}/README.md`,
       ].find((name) => files[name] !== undefined);
       if (candidate) {
-        link.onclick = (event) => {
-          event.preventDefault();
-          open(candidate, decodeURIComponent(target.hash.slice(1)));
-        };
+        const activate = () => open(candidate, decodeURIComponent(target.hash.slice(1)));
+        if (openExternal) hostLink(link, activate);
+        else
+          link.onclick = (event) => {
+            event.preventDefault();
+            activate();
+          };
         return;
       }
     } catch {

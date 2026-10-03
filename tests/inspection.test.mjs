@@ -6,27 +6,46 @@ import {
   performanceFromRows,
 } from "../src/inspection.ts";
 
+const ref = { project: "project", epoch: "project-epoch", engineEpoch: "engine",
+  revision: "7", sourceVersion: 1, entry: "song.muz" };
+
 test("inspection client bounds requests, caches pages and rejects stale revisions", async () => {
   const calls = [];
-  const compiler = {
-    async call(message) {
-      calls.push(message);
-      return { revision: 7, rows: [{ id: 1 }], total: 1 };
+  const runtime = {
+    async inspect(received, view, page) {
+      calls.push({ ref: received, view, page });
+      return { ref, view, rows: [{ id: 1 }], total: 1, next: null };
     },
   };
-  const client = new InspectionClient(compiler, 7);
+  const client = new InspectionClient(runtime, ref);
   const first = await client.inspect("graph", { limit: 5000 });
   const second = await client.inspect("graph", { limit: 5000 });
   assert.equal(first, second);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].page.limit, 1000);
-  assert.equal(calls[0].revision, 7);
+  assert.deepEqual(calls[0].ref, ref);
+  for (const field of ["project", "epoch", "engineEpoch", "revision", "entry", "sourceVersion"]) {
+    const stale = new InspectionClient({
+      inspect: async () => ({ ref: { ...ref, [field]: field === "sourceVersion" ? 2 : "stale" }, rows: [], total: 0, next: null }),
+    }, ref);
+    await assert.rejects(stale.inspect("sections"), /Stale inspection revision/);
+  }
+});
 
-  const stale = new InspectionClient(
-    { call: async () => ({ revision: 6, rows: [], total: 0 }) },
-    7,
-  );
-  await assert.rejects(stale.inspect("sections"), /Stale inspection revision/);
+test("inspection convenience operations preserve ref and bounded previous diff", async () => {
+  const base = { ...ref, revision: "6" };
+  const runtime = {
+    async explain(received, track, query) {
+      assert.deepEqual(received, ref); assert.equal(track, "lead"); assert.equal(query.limit, 1000);
+      return { ref, rows: [], total: 0, next: null };
+    },
+    async diff(received, category) { return { ref: received, base, category, rows: [], total: 0, next: null }; },
+    async location(received, key) { assert.deepEqual(received, ref); assert.equal(key, "note"); return null; },
+  };
+  const client = new InspectionClient(runtime, ref);
+  await client.explain("lead", 0, 5000);
+  assert.deepEqual((await client.diff("notes")).base, base);
+  assert.equal(await client.location("note"), null);
 });
 
 test("paged graph and performance rows adapt without restoring full views", () => {

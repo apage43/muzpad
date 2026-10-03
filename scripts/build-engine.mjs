@@ -15,7 +15,7 @@ const before = coreState(config.core);
 await mkdir(resolve(root, "public"), { recursive: true });
 execFileSync(
   "cargo",
-  ["build", "--release", "--target", "wasm32-unknown-unknown"],
+  ["build", "--release", "--target", "wasm32-unknown-unknown", "--target-dir", resolve(root, "target")],
   { cwd: root, stdio: "inherit" },
 );
 const wasm = resolve(root, "public/muz.wasm");

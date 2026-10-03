@@ -453,6 +453,37 @@ test("explain and diff are revision-bound and reject stale inspection", async ()
   );
 });
 
+test("unaccepted candidates do not evict the previous accepted inspection baseline", async () => {
+  const compiler = await createEngine(bytes);
+  const first = compiler.call({ command: "compile", files, entry: "song.muz" });
+  compiler.call({ command: "accept_compilation", revision: first.revision });
+  const second = compiler.call({ command: "compile", files, entry: "song.muz" });
+  compiler.call({ command: "accept_compilation", revision: second.revision });
+  // This candidate represents a cancelled or rejected renderer preparation.
+  compiler.call({ command: "compile", files, entry: "song.muz" });
+  const previous = compiler.call({ command: "inspect", revision: first.revision,
+    view: "summary", page: { limit: 1 } });
+  assert.equal(previous.revision, first.revision);
+  const comparison = compiler.call({ command: "diff", revision: second.revision,
+    category: "notes", page: { limit: 1 } });
+  assert.equal(comparison.base_revision, first.revision);
+});
+
+test("browser panic preserves transport position and detailed capture can be disabled", async () => {
+  const engine = await createEngine(bytes);
+  const compiled = engine.call({ command: "compile", files, entry: "song.muz" });
+  engine.call({ command: "load", snapshot: compiled.snapshot, rate: 48000 });
+  engine.call({ command: "render", frames: 256 });
+  const before = engine.call({ command: "status" });
+  const after = engine.call({ command: "panic" });
+  assert.equal(after.beat, before.beat);
+  assert.equal(after.revision, before.revision);
+  assert.ok(after.generation > before.generation);
+  const rendered = engine.call({ command: "render", frames: 256, analysis_enabled: false });
+  assert.ok(engine.audio(256, undefined, true).every((sample) => sample === 0));
+  assert.ok(rendered.meters.every((meter) => Number.isFinite(meter.rms) && meter.rms >= 0));
+});
+
 test("WASM loops remain inside their range and one-shot playback finishes after the tail", async () => {
   const e = await createEngine(bytes);
   const c = e.call({ command: "compile", files, entry: "song.muz" });

@@ -21,6 +21,7 @@ export class AudioPlayer {
   epoch = 0;
   loop: [number, number] | null = null;
   analysisSource: string | null = null;
+  private analysisEnabled = false;
   onPosition: (value: any) => void = () => {};
   onError: (value: any) => void = () => {};
   onPlaying: () => void = () => {};
@@ -41,7 +42,7 @@ export class AudioPlayer {
     const analyser = context.createAnalyser();
     analyser.fftSize = 2048;
     node.connect(context.destination, 0);
-    node.connect(analyser, 1);
+    if (this.analysisEnabled) node.connect(analyser, 1);
     const silent = context.createGain();
     silent.gain.value = 0;
     analyser.connect(silent).connect(context.destination);
@@ -68,6 +69,7 @@ export class AudioPlayer {
       type: "module",
     });
     worker.onmessage = ({ data }) => {
+      if (this.worker !== worker) return;
       if (data.type === "fatal") {
         this.dispose();
         this.onError(data.error);
@@ -96,6 +98,7 @@ export class AudioPlayer {
       }
     };
     worker.onerror = (event) => {
+      if (this.worker !== worker) return;
       this.dispose();
       this.onError({
         message: `Rendering worker failed; playback continuity was lost. ${event.message}`,
@@ -116,6 +119,13 @@ export class AudioPlayer {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.requests.delete(id);
+        if (message.type === "apply") {
+          this.dispose();
+          this.onError({
+            code: "child_died",
+            message: "Audio application did not acknowledge its outcome. Restart the engine before continuing.",
+          });
+        }
         if (message.type === "prepare" || message.type === "apply")
           this.worker?.postMessage({
             type: "discard",
@@ -157,6 +167,7 @@ export class AudioPlayer {
     isCurrent: () => boolean,
     assets: any[] = [],
     onCommit?: () => void,
+    authorize?: () => Promise<void>,
   ) {
     await this.init();
     if (!isCurrent()) return null;
@@ -171,6 +182,12 @@ export class AudioPlayer {
       rate: this.context!.sampleRate,
       base_revision: this.revision,
     });
+    try {
+      if (authorize) await authorize();
+    } catch (error) {
+      this.worker?.postMessage({ type: "discard", request });
+      throw error;
+    }
     if (!isCurrent() || request !== this.acceptance) {
       this.worker?.postMessage({ type: "discard", request });
       return null;
@@ -190,7 +207,7 @@ export class AudioPlayer {
       this.worker?.postMessage({ type: "loop", range: null });
     }
     if (initial)
-      this.seek(Math.min(this.beat, Math.max(0, status.endBeat - 0.001)));
+      await this.seek(Math.min(this.beat, Math.max(0, status.endBeat - 0.001)));
     return status;
   }
   async play() {
@@ -206,36 +223,65 @@ export class AudioPlayer {
   }
   selectAnalysis(id: string | null) {
     this.analysisSource = id;
-    this.worker?.postMessage({ type: "analysis", id });
+    this.worker?.postMessage({ type: "analysis", id, enabled: this.analysisEnabled });
     this.node?.port.postMessage({ type: "analysis", id });
+  }
+  setAnalysisEnabled(enabled: boolean) {
+    if (this.analysisEnabled === enabled) return;
+    this.analysisEnabled = enabled;
+    if (this.node && this.analyser) {
+      if (enabled) this.node.connect(this.analyser, 1);
+      else this.node.disconnect(this.analyser, 1);
+    }
+    this.selectAnalysis(this.analysisSource);
   }
   pause() {
     this.playing = false;
     this.node?.port.postMessage({ type: "playing", value: false });
     this.onPlaying();
   }
-  seek(beat: number) {
-    this.beat = beat;
+  async seek(beat: number) {
     this.epoch++;
-    this.worker?.postMessage({
-      type: "seek",
-      beat,
-      range: this.loop,
-      epoch: this.epoch,
+    const status = await this.call({
+      type: "seek", beat, range: this.loop, epoch: this.epoch,
     });
+    this.beat = status.beat;
+    return status;
   }
-  stop() {
+  async stop() {
     this.pause();
-    this.seek(this.loop?.[0] ?? 0);
+    return this.seek(this.loop?.[0] ?? 0);
   }
-  setLoop(range: [number, number] | null) {
+  async setLoop(range: [number, number] | null) {
+    const previous = this.loop;
     this.loop = range;
-    this.seek(range?.[0] ?? this.beat);
+    try {
+      return await this.seek(range?.[0] ?? this.beat);
+    } catch (error) {
+      this.loop = previous;
+      throw error;
+    }
+  }
+  async panic() {
+    const status = await this.call({ type: "panic", epoch: ++this.epoch });
+    this.beat = status.beat;
+    return status;
+  }
+  async shutdown() {
+    this.dispose();
+    this.node?.disconnect();
+    this.analyser?.disconnect();
+    await this.context?.close();
+    this.context = undefined;
+    this.node = undefined;
+    this.analyser = undefined;
   }
 }
 
 export class Compiler {
   worker = this.create();
+  private failure?: string;
+  onFailure: (message: string) => void = () => {};
   next = 0;
   requests = new Map<
     number,
@@ -251,6 +297,14 @@ export class Compiler {
       { type: "module" },
     );
     worker.onmessage = ({ data }) => {
+      if (this.worker !== worker) return;
+      if (data.fatal) {
+        this.failure = data.error.message;
+        this.worker.terminate();
+        this.cancel(this.failure);
+        this.onFailure(this.failure!);
+        return;
+      }
       const pending = this.requests.get(data.id);
       if (!pending) return;
       clearTimeout(pending.timer);
@@ -263,17 +317,26 @@ export class Compiler {
         );
       else pending.resolve(data.value);
     };
-    worker.onerror = (event) => this.reset(event.message);
+    worker.onerror = (event) => {
+      if (this.worker !== worker) return;
+      this.failure = event.message || "Compiler worker failed";
+      this.worker.terminate();
+      this.cancel(this.failure);
+      this.onFailure(this.failure);
+    };
     return worker;
   }
   call(message: any): Promise<any> {
+    if (this.failure) return Promise.reject(new Error(this.failure));
     const id = ++this.next;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(
-        () =>
-          this.reset(
-            "Compilation exceeded 30 seconds. Simplify the source and try again.",
-          ),
+        () => {
+          this.failure = "Compilation exceeded 30 seconds. Restart the engine before rebuilding.";
+          this.worker.terminate();
+          this.cancel(this.failure);
+          this.onFailure(this.failure);
+        },
         30000,
       );
       this.requests.set(id, { resolve, reject, timer });
@@ -281,6 +344,7 @@ export class Compiler {
     });
   }
   reset(reason = "Cancelled") {
+    this.failure = undefined;
     this.worker.terminate();
     this.cancel(reason);
     this.worker = this.create();
@@ -291,5 +355,10 @@ export class Compiler {
       request.reject(new Error(reason));
     }
     this.requests.clear();
+  }
+  dispose() {
+    this.failure = "Compiler disposed";
+    this.worker.terminate();
+    this.cancel(this.failure);
   }
 }

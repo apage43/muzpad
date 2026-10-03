@@ -1,43 +1,39 @@
 import { escapeHTML as esc } from "./views";
+import type { AcceptedRevision, ExportSpec, WorkbenchRuntime } from "./host/contracts";
 
-type ExportRevision = {
-  snapshot: any;
-  assets: any[];
-  duration: number;
-  revision: number;
-  name: string;
-};
+type ExportRevision = AcceptedRevision & { name: string };
 
 /** Retains the exact accepted assets even when the working copy changes. */
 export class ProjectExporter {
   private accepted?: ExportRevision;
-  private worker?: Worker;
+  private request?: AbortController;
+  private unsubscribe?: () => void;
   private dialog?: HTMLDialogElement;
+  constructor(private runtime: WorkbenchRuntime) {}
   set(value?: ExportRevision) {
     this.accepted = value;
     const button = document.getElementById("export-media") as HTMLButtonElement;
-    button.disabled = !value;
+    if (button) button.disabled = !value;
   }
   open(edited: boolean) {
     const revision = this.accepted;
     if (!revision) return;
     this.close();
-    const tracks = revision.snapshot.description.tracks;
-    const fullEnd =
-      revision.duration + revision.snapshot.description.extras.tail;
+    const tracks = revision.exportTracks;
+    const fullEnd = revision.status.duration + revision.status.tail;
     const dialog = document.createElement("dialog");
     this.dialog = dialog;
     dialog.className = "export-dialog";
     dialog.setAttribute("aria-labelledby", "export-title");
     dialog.innerHTML = `<h2 id="export-title">Export audio & MIDI</h2>
-      <p>Accepted revision ${revision.revision + 1}${edited ? " · Rebuild first to include your latest edits." : "."}</p>
+      <p>Accepted revision ${esc(revision.ref.revision)}${edited ? " · Rebuild first to include your latest edits." : "."}</p>
       <button id="export-master" class="primary">Download master WAV</button>
       <p class="export-help">Full song and effect tail · stereo · 48 kHz / 24-bit. Uses the written mix; temporary mute and solo are ignored.</p>
       <form id="export-form">
       <fieldset><legend>Custom export</legend>
       <label>Format <select id="export-format"><option value="wav">WAV audio</option><option value="midi">Multitrack MIDI (.mid)</option></select></label>
       <div class="export-tracks"><strong>Tracks</strong><div><button type="button" id="export-all">Select all</button> <button type="button" id="export-none">Clear</button></div>
-      ${tracks.map((t: any, i: number) => `<label><input type="checkbox" name="export-track" value="${i}" checked> ${esc(t.name || t.id)}</label>`).join("")}</div>
+      ${tracks.map((t, i) => `<label><input type="checkbox" name="export-track" value="${i}" checked> ${esc(t.name || t.id)}</label>`).join("")}</div>
       <p id="export-routing" class="export-help">Selected tracks mixed through their buses and master effects into one stereo WAV. Soloed exports may change shared effects and sidechains.</p>
       <div id="export-wav-settings" class="export-settings">
       <label>Sample rate <select id="export-rate"><option value="44100">44.1 kHz</option><option value="48000" selected>48 kHz</option><option value="96000">96 kHz</option></select></label>
@@ -71,10 +67,8 @@ export class ProjectExporter {
       get("export-progress").hidden = !busy;
     };
     const cancel = () => {
-      this.worker?.terminate();
-      this.worker = undefined;
-      setBusy(false);
-      report("Export cancelled.");
+      this.request?.abort();
+      report("Cancelling export…");
     };
     get("export-cancel").onclick = cancel;
     get("export-close").onclick = () => this.close();
@@ -106,14 +100,14 @@ export class ProjectExporter {
         : "Download WAV";
       inputs.forEach((input) => {
         input.disabled =
-          midi && tracks[Number(input.value)].source.kind !== "midi";
+          midi && !tracks[Number(input.value)].midi;
       });
     };
     const start = (master: boolean) => {
-      if (this.worker) return;
+      if (this.request) return;
       const kind = master ? "wav" : format.value;
       const selected = master
-        ? tracks.map((t: any) => t.id)
+        ? tracks.map((t) => t.id)
         : inputs
             .filter((input) => input.checked && !input.disabled)
             .map((input) => tracks[Number(input.value)].id);
@@ -140,68 +134,40 @@ export class ProjectExporter {
         );
         return;
       }
-      const worker = new Worker(
-        new URL("./export.worker.ts", import.meta.url),
-        { type: "module" },
-      );
-      this.worker = worker;
+      const request = new AbortController();
+      const requestId = crypto.randomUUID();
+      this.request = request;
       setBusy(true);
       get<HTMLProgressElement>("export-progress").value = 0;
       report("Preparing export…");
-      const finish = () => {
-        worker.terminate();
-        this.worker = undefined;
-        setBusy(false);
-      };
-      worker.onerror = (event) => {
-        finish();
-        report(`Export failed: ${event.message}`);
-      };
-      worker.onmessage = ({ data }) => {
-        if (data.progress !== undefined) {
-          get<HTMLProgressElement>("export-progress").value = data.progress;
-          report(`Rendering WAV… ${Math.round(data.progress * 100)}%`);
-          return;
-        }
-        finish();
-        if (data.error) {
-          report(`Export failed: ${data.error}`);
-          return;
-        }
-        const blob = new Blob([data.bytes], {
-          type: kind === "wav" ? "audio/wav" : "audio/midi",
-        });
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = url;
-        const name =
-          revision.name.replace(/[^a-zA-Z0-9._-]+/g, "-") || "muz-project";
-        const scope = master
-          ? "master"
-          : selected.length === 1
-            ? selected[0].replace(/[^a-zA-Z0-9._-]+/g, "-")
-            : "mix";
-        link.download = `${name}-${scope}.${kind === "wav" ? "wav" : "mid"}`;
-        link.click();
-        setTimeout(() => URL.revokeObjectURL(url), 10000);
-        report(
-          data.clipped
-            ? "Downloaded. Some samples clipped above 0 dBFS; lower the mix level and export again."
-            : "Downloaded.",
-        );
-      };
-      worker.postMessage({
-        format: kind,
-        snapshot: revision.snapshot,
-        assets: kind === "wav" ? revision.assets : [],
-        tracks: selected,
-        rate: master
-          ? 48000
-          : Number(get<HTMLSelectElement>("export-rate").value),
-        bits: master ? 24 : Number(get<HTMLSelectElement>("export-bits").value),
-        start: from,
-        end,
+      this.unsubscribe = this.runtime.subscribe((event) => {
+        if (event.kind !== "exportProgress" || event.requestId !== requestId) return;
+        const progress = get<HTMLProgressElement>("export-progress");
+        if (event.progress === null) progress.removeAttribute("value");
+        else progress.value = event.progress;
+        report(`${event.phase}${event.progress === null ? "…" : `… ${Math.round(event.progress * 100)}%`}`);
       });
+      const spec: ExportSpec = master ? { kind: "masterWav" }
+        : kind === "midi" ? { kind: "midi", tracks: selected }
+        : { kind: "wav", tracks: selected,
+          rate: Number(get<HTMLSelectElement>("export-rate").value) as 44100 | 48000 | 96000,
+          bits: Number(get<HTMLSelectElement>("export-bits").value) as 16 | 24,
+          start: from, end };
+      void this.runtime.export(revision.ref, spec, { requestId, signal: request.signal })
+        .then((result) => {
+          report(result.clipped
+            ? "Exported. Some samples clipped above 0 dBFS; lower the mix level and export again."
+            : `Exported ${result.name}.`);
+        }, (error) => {
+          report(error.code === "cancelled" ? "Export cancelled."
+            : `Export failed: ${error.message ?? String(error)}`);
+        }).finally(() => {
+          if (this.request !== request) return;
+          this.request = undefined;
+          this.unsubscribe?.();
+          this.unsubscribe = undefined;
+          setBusy(false);
+        });
     };
     get("export-master").onclick = () => start(true);
     get<HTMLFormElement>("export-form").onsubmit = (event) => {
@@ -211,8 +177,10 @@ export class ProjectExporter {
     dialog.showModal();
   }
   close() {
-    this.worker?.terminate();
-    this.worker = undefined;
+    this.request?.abort();
+    this.request = undefined;
+    this.unsubscribe?.();
+    this.unsubscribe = undefined;
     this.dialog?.close();
     this.dialog?.remove();
     this.dialog = undefined;

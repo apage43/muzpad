@@ -7,3 +7,7 @@ test-results/
 .wrangler/
 public/engine-build.json
 .artifacts/
+src-tauri/target/
+src-tauri/binaries/muzpad-engine-*
+src-tauri/resources/library/
+src-tauri/gen/

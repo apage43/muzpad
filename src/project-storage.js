@@ -1,7 +1,8 @@
 const DATABASE = "muzpad-projects-v1";
-const VERSION = 1;
+const VERSION = 2;
 const PROJECTS = "projects";
 const ASSETS = "assets";
+const DIRECTORIES = "directories";
 const saves = new Map();
 
 function storageId(key) {
@@ -48,6 +49,8 @@ async function database() {
       db.createObjectStore(PROJECTS, { keyPath: "id" });
     if (!db.objectStoreNames.contains(ASSETS))
       db.createObjectStore(ASSETS, { keyPath: "id" });
+    if (!db.objectStoreNames.contains(DIRECTORIES))
+      db.createObjectStore(DIRECTORIES, { keyPath: "id" });
   };
   return requestResult(request);
 }
@@ -151,5 +154,49 @@ async function storeProject(key, project) {
       await removeIndexedProject(id).catch(() => {});
       throw error;
     }
+  }
+}
+
+/** Remove a recovery/recent slot after its queued writes have settled. */
+export async function removeStoredProject(key) {
+  await saves.get(key)?.catch(() => {});
+  globalThis.localStorage.removeItem(key);
+  await removeIndexedProject(storageId(key));
+}
+
+/** Directory handles are structured-cloneable, but never JSON-serializable. */
+export async function saveProjectDirectory(id, handle) {
+  const db = await database();
+  try {
+    const transaction = db.transaction(DIRECTORIES, "readwrite");
+    transaction.objectStore(DIRECTORIES).put({ id, handle });
+    await transactionDone(transaction);
+  } finally {
+    db.close();
+  }
+}
+
+export async function loadProjectDirectory(id) {
+  const db = await database();
+  try {
+    const transaction = db.transaction(DIRECTORIES, "readonly");
+    const [record] = await Promise.all([
+      requestResult(transaction.objectStore(DIRECTORIES).get(id)),
+      transactionDone(transaction),
+    ]);
+    return record?.handle ?? null;
+  } finally {
+    db.close();
+  }
+}
+
+export async function removeProjectDirectory(id) {
+  const db = await database();
+  try {
+    const transaction = db.transaction(DIRECTORIES, "readwrite");
+    transaction.objectStore(DIRECTORIES).delete(id);
+    await transactionDone(transaction);
+  } finally {
+    db.close();
   }
 }

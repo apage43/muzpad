@@ -1,4 +1,7 @@
 {
   "core": "../muz-core",
-  "gists": []
+  "gists": [],
+  "desktop": {
+    "releaseDirectory": ".artifacts/desktop"
+  }
 }
