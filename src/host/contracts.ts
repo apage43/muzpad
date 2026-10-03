@@ -21,12 +21,23 @@ export type Operation = { requestId: RequestId; signal?: AbortSignal };
 export type SourceLocation = {
   path: string; line: number; column: number; text: string; indent: number; width: number;
 };
+export type AttemptedAction = 'rebuild'|'classifyEntries'|'format'|'play'|'pause'|'stop'|
+  'restart'|'panic'|'seek'|'loop'|'audition'|'analysis'|'inspect'|'export'|
+  'save'|'refresh'|'openProject'|'importProject'|'trustAndRun'|'recovery'|'restartEngine'|'project';
+export type OperationContext = {
+  action: AttemptedAction; requestId: RequestId; ref: RevisionRef|null;
+  outcome: 'applied'|'rejected'|'cancelled'|'superseded'|'unknown'|'partial';
+  continuity: Failure['continuity']; phase: Failure['phase'];
+  expectedRuntimeRevision: U64|null; actualRuntimeRevision: U64|null;
+};
 export type Failure = {
   code: string;
   phase: 'project'|'compile'|'prepare'|'apply'|'transport'|'inspect'|'export'|'engine';
   message: string; help?: string[]; location?: SourceLocation;
   callers?: SourceLocation[]; path?: string; requestId?: RequestId;
   revision?: RevisionId; continuity: 'preserved'|'lost'|'not-started';
+  operation?: OperationContext;
+  runtime?: {code:string;expectedRevision:U64|null;observedRevision:U64|null};
 };
 export type Availability = { available: boolean; reason: string|null };
 export type HostLimits = {
@@ -78,25 +89,37 @@ export type TransportCommand =
   { kind: 'seek'; beat: number } | { kind: 'loop'; range: [number,number]|null };
 export type TrackMeter = { track: string; peak: number; rms: number };
 export type TransportStatus = {
-  ref: RevisionRef; generation: U64; playing: boolean; finished: boolean;
+  ref: RevisionRef; generation: U64; sequence: U64; playing: boolean; finished: boolean;
   beat: number; seconds: number; bpm: number; meter: [number,number];
   duration: number; endBeat: number; tail: number; loop: [number,number]|null;
   peak: number; rms: number; meters: TrackMeter[];
   audio: AudioConfiguration; health: JsonObject;
 };
+export type AnalysisSubscription = {
+  source: string|null; detail: boolean; meters: boolean; detailHz: number; meterHz: number;
+};
 export type AnalysisFrame = {
   ref: RevisionRef; generation: U64; sequence: U64; source: string|null;
   sampleRate: number; captureSeconds: number; waveform: number[]; spectrum: number[];
+  /** Peak/RMS describe the same selected unwindowed mono history, not master meters. */
   meters: TrackMeter[]; peak: number; rms: number; dropped: U64;
+  /** Warmup carries no measured waveform/spectrum; it retires previously presented detail. */
+  captureId: U64; windowEndSample: U64|null; sampleCount: number; warmup: boolean;
+  window: 'hann'|'blackman'; smoothing: number;
+  metersPresent: boolean; meterWindowEndSample: U64|null;
 };
 export type AcceptedRevision = {
   ref: RevisionRef; status: TransportStatus; effect: Json;
   initialPages: Record<'summary'|'graph'|'sections'|'track_groups'|'locations'|'diagnostics',InspectionPage>;
   exportTracks: { id: string; name: string; midi: boolean }[];
 };
+export type EntryClassification = {
+  entry: string; kind: 'song'|'non-song'|'unresolved'; description?: string;
+  readiness: {kind: 'unchecked'|'validated'}|{kind: 'blocked'; failure: Failure};
+  failure: Failure|null;
+};
 export type EntryCheckResult = {
-  snapshot: SourceSnapshotId; sourceVersion: number;
-  entries: { entry: string; playable: boolean; failure: Failure|null }[];
+  snapshot: SourceSnapshotId; sourceVersion: number; entries: EntryClassification[];
 };
 export type ExportSpec =
   { kind: 'masterWav' } |
@@ -108,7 +131,8 @@ export type RuntimeEvent =
   { kind: 'build'; requestId: RequestId; project: ProjectRef; sourceVersion: number;
     phase: 'queued'|'compiling'|'preparing'|'applying'|'accepted'|'rejected'|'cancelled';
     ref: RevisionRef|null; failure: Failure|null } |
-  { kind: 'entries'; requestId: RequestId; snapshot: SourceSnapshotId; done: number; total: number } |
+  { kind: 'entries'; requestId: RequestId; snapshot: SourceSnapshotId; done: number; total: number;
+    currentEntry: string|null; result: EntryClassification|null } |
   { kind: 'status'; status: TransportStatus } |
   { kind: 'analysis'; frame: AnalysisFrame } |
   { kind: 'exportProgress'; requestId: RequestId; job: JobId; ref: RevisionRef;
@@ -127,7 +151,7 @@ export interface WorkbenchRuntime {
   diff(ref: RevisionRef, category: DiffCategory, page: PageRequest, op: Operation): Promise<DiffPage>;
   transport(ref: RevisionRef, command: TransportCommand, op: Operation): Promise<TransportStatus>;
   audition(ref: RevisionRef, controls: {muted: string[]; solo: string[]}, op: Operation): Promise<void>;
-  analysis(ref: RevisionRef, source: string|null, enabled: boolean): Promise<void>;
+  analysis(ref: RevisionRef, subscription: AnalysisSubscription): Promise<void>;
   export(ref: RevisionRef, spec: ExportSpec, op: Operation): Promise<ExportResult>;
   subscribe(listener: (event: RuntimeEvent) => void): () => void;
   dispose(): Promise<void>;
@@ -152,6 +176,7 @@ export type ProjectSnapshot = ProjectRef & {
   diskGeneration: U64; settingsDiskVersion: DiskVersion|null;
   files: ProjectFile[]; resources: ResourceDescriptor[]; conflicts: SourceConflict[];
   dirty: boolean; rootLabel: string|null;
+  execution: {trusted: boolean; policy: 'account-native'|'preview'|'sandbox'};
   gist?: string; // Normalized ID[/revision] provenance, separate from source settings.
 };
 export type BufferCapture = {
@@ -206,6 +231,7 @@ export interface ProjectStore {
   listRecent(): Promise<RecentProject[]>;
   newProject(settings: ProjectSettings, op: Operation): Promise<ProjectSnapshot>;
   importProject(input: ImportInput, op: Operation): Promise<ProjectSnapshot|null>;
+  trustAndRun(input: {project: ProjectRef}, op: Operation): Promise<ProjectSnapshot|null>;
   readLibraryDocument(input: {project: ProjectRef|null; id: string}, op: Operation): Promise<{id: string; path: string; text: string; kind: 'source'|'document'|'text'}>;
   resolveSourceDocument(input: {project: ProjectRef; path: string}, op: Operation): Promise<ResolvedSourceDocument|null>;
   save(input: SaveInput, op: Operation): Promise<SaveResult>;

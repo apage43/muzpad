@@ -14,6 +14,16 @@ export function enableGraphPanning(
       }
     | undefined;
   let suppressClick = false;
+  let frame = 0;
+  let pending: { left: number; top: number } | undefined;
+  const applyScroll = () => {
+    frame = 0;
+    if (!pending) return;
+    const { left, top } = pending;
+    pending = undefined;
+    if (viewport.scrollLeft !== left) viewport.scrollLeft = left;
+    if (viewport.scrollTop !== top) viewport.scrollTop = top;
+  };
 
   viewport.addEventListener("pointerdown", (event) => {
     suppressClick = false;
@@ -55,12 +65,17 @@ export function enableGraphPanning(
       viewport.classList.add("panning");
     }
     event.preventDefault();
-    viewport.scrollLeft = gesture.left - dx;
-    viewport.scrollTop = gesture.top - dy;
+    pending = {
+      left: Math.max(0, Math.min(viewport.scrollWidth - viewport.clientWidth, gesture.left - dx)),
+      top: Math.max(0, Math.min(viewport.scrollHeight - viewport.clientHeight, gesture.top - dy)),
+    };
+    if (!frame) frame = requestAnimationFrame(applyScroll);
   });
 
   const finish = (event: PointerEvent) => {
     if (!gesture || event.pointerId !== gesture.pointer) return;
+    cancelAnimationFrame(frame);
+    applyScroll();
     suppressClick = gesture.dragging;
     gesture = undefined;
     viewport.classList.remove("panning");

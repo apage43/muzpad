@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { clickCommand } from "./commands";
 const source = `song({tracks: [
   track("rack.a", stack([
     phrase("C4:q").map_notes(fn(n) => {voice:"metal.high",velocity:0.9}),
@@ -31,7 +32,7 @@ test("kit lanes collapse, zoom into hits, select physical tracks, and retain sou
     "density",
   );
   await expect(page.locator("#kit-legend")).toHaveText(
-    "Kit lanes: hit density",
+    "Kit lanes: onset density",
   );
   const expandedHeight = await page
     .locator(".arrangement-surface")
@@ -40,6 +41,7 @@ test("kit lanes collapse, zoom into hits, select physical tracks, and retain sou
   await expect(
     page.getByRole("button", { name: "Expand rack.a kit" }),
   ).toHaveAttribute("aria-expanded", "false");
+  await expect(page.locator("#arrangement")).toHaveAttribute("data-inspection-state", "ready");
   await page.getByRole("button", { name: "Expand rack.a kit" }).press("Enter");
   await expect(
     page.getByRole("button", { name: "Collapse rack.a kit" }),
@@ -57,17 +59,28 @@ test("kit lanes collapse, zoom into hits, select physical tracks, and retain sou
   });
   await expect(page.locator("#arrangement")).toHaveAttribute(
     "data-inspection-state",
-    "detail",
+    "ready",
   );
   await expect(page.locator("#arrangement")).toHaveAttribute(
     "data-kit-view",
     "hits",
   );
   await expect(page.locator("#kit-legend")).toContainText("velocity");
-  // kick sorts before metal.high; the second compact row centers at y=132.
+  const kitMeter = page.locator('.track-meter[data-track="rack.a.metal.high"]');
+  const kitMute = page.getByRole("button", { name: "Mute rack.a.metal.high", exact: true });
+  await expect(kitMeter).toBeVisible();
+  await expect(kitMute).toBeVisible();
+  const meterBounds = await kitMeter.boundingBox();
+  const muteBounds = await kitMute.boundingBox();
+  if (!meterBounds || !muteBounds) throw new Error("Visible kit controls require geometry");
+  expect(muteBounds.width).toBeGreaterThanOrEqual(30);
+  expect(muteBounds.height).toBeGreaterThanOrEqual(30);
+  expect(meterBounds.x + meterBounds.width).toBeLessThanOrEqual(muteBounds.x);
+  await clickCommand(page, "#toggle-inspector");
+  // The second compact lane starts at130, with its marker centered at144.
   await page
     .locator("#arrangement canvas")
-    .click({ position: { x: 131, y: 132 } });
+    .click({ position: { x: 155, y: 144 } });
   await expect(page.locator("#selection-label")).toHaveText(
     "rack.a · metal.high hit",
   );
@@ -77,6 +90,22 @@ test("kit lanes collapse, zoom into hits, select physical tracks, and retain sou
   );
   await page.locator("#jump-source").click();
   await expect(page.locator("#source-path")).toHaveText("song.muz");
+  const viewport = page.locator("#arrangement");
+  const collapse = page.getByRole("button", { name: "Collapse rack.a kit" });
+  await expect(viewport).toHaveAttribute("data-inspection-state", "ready");
+  await collapse.focus();
+  await viewport.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => resolve())));
+  await expect(viewport).toHaveAttribute("data-inspection-state", "ready");
+  await expect(collapse).toBeEnabled();
+  await collapse.focus();
+  await expect(collapse).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("button", { name: "Expand rack.a kit" })).toHaveAttribute("aria-expanded", "false");
+  await expect(page.locator("#selection-label")).toHaveText("rack.a · metal.high hit");
+  await expect(page.locator("#arrangement")).toHaveAttribute("data-inspection-state", "ready");
+  await page.getByRole("button", { name: "Expand rack.a kit" }).press("Enter");
+  await expect(page.getByRole("button", { name: "Collapse rack.a kit" })).toHaveAttribute("aria-expanded", "true");
+  await expect(page.locator("#arrangement")).toHaveAttribute("data-inspection-state", "ready");
   await page.locator("#play").click();
   await page.getByRole("button", { name: "Collapse rack.a kit" }).click();
   await expect(page.locator("#play")).toHaveText("Ⅱ Pause");

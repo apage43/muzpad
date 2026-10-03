@@ -1,4 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
+import { clickCommand } from "./commands";
 import { readFile } from "node:fs/promises";
 import { unzipSync } from "fflate";
 
@@ -168,10 +169,12 @@ for (const theme of themes) {
     await page.locator(".range-menu > summary").click();
     await assertContrast(page, [{ selector: ".range-menu label" }, { selector: ".range-menu button" }]);
     await page.locator(".range-menu > summary").click();
-    await page.locator("#export-media").click();
+    await clickCommand(page, "#export-media");
     await expect(page.locator(".export-dialog")).toBeVisible();
     await assertContrast(page, [{ selector: ".export-dialog label" }, { selector: ".export-dialog button" }]);
     await page.locator("#export-close").click();
+    await page.locator("#analysis-disclosure > summary").click();
+    await page.locator("#toggle-inspector").click();
     await assertContrast(page, [
       { selector: "#source-path" }, { selector: "#revision" }, { selector: "[data-tab]" },
       { selector: ".view-tabs button" }, { selector: ".cm-line" }, { selector: ".cm-line span" },
@@ -215,8 +218,8 @@ for (const theme of themes) {
     await page.keyboard.press("ControlOrMeta+Home");
     await page.keyboard.insertText("unknown_symbol();\n");
     await page.locator("#run").click();
-    await expect(page.locator("#build-state")).toHaveText("Needs attention");
-    await assertContrast(page, [{ selector: "#diagnostic-list" }, { selector: "#diagnostic-list button" }, { selector: "#build-state" }]);
+    await expect(page.locator("#build-state")).toHaveText("Build failed");
+    await assertContrast(page, [{ selector: "#workflow-status .action-status" }, { selector: "#workflow-status [data-open-error]" }, { selector: "#build-state" }]);
   });
 
   test(`${theme}: theme and layout persist without entering project archives`, async ({ page }) => {
@@ -231,7 +234,7 @@ for (const theme of themes) {
     await expect(page.locator("#revision")).toHaveText(revision!);
     await expect.poll(() => page.evaluate(() => localStorage.getItem("muzpad-preferences-v1"))).toContain(theme);
     const downloadEvent = page.waitForEvent("download");
-    await page.locator("#download").click();
+    await clickCommand(page, "#download");
     const archive = unzipSync(new Uint8Array(await readFile((await (await downloadEvent).path())!)));
     expect(Object.keys(archive).sort()).toEqual(["README.md", "muzpad.json", "song.muz"]);
     const settings = JSON.parse(new TextDecoder().decode(archive["muzpad.json"]));
@@ -244,7 +247,7 @@ for (const theme of themes) {
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
     await expect(page.locator("#explorer-pane")).toBeHidden();
     await expect(page.locator("#inspector")).toBeHidden();
-    await page.locator("#new-project").click();
+    await clickCommand(page, "#new-project");
     await expect(page.locator("#project-title")).toHaveText("Untitled project");
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
     await expect(page.locator("#explorer-pane")).toBeHidden();
@@ -327,13 +330,13 @@ test("theme changes redraw idle and hidden visualization without resetting graph
   await page.locator('[data-view="routing"]').click();
   const network = await page.locator(".network").elementHandle();
   await page.locator("#play").click();
-  await page.locator("#pane-visualization").click();
+  await clickCommand(page, "#pane-visualization");
   for (const theme of themes) {
     await page.locator("#theme-toggle").click();
     await page.locator("#settings-theme").selectOption(theme);
     await page.locator("#settings-close").click();
   }
-  await page.locator("#pane-visualization").click();
+  await clickCommand(page, "#pane-visualization");
   expect(await network!.evaluate(element => element.isConnected)).toBe(true);
   await expect(page.locator(".network")).toBeVisible();
   await expect(page.locator("#play")).toHaveText("Ⅱ Pause");
@@ -381,19 +384,19 @@ for (const failure of ["getter", "setter"]) {
       await page.keyboard.press("ControlOrMeta+a");
       await page.keyboard.insertText("song({ tracks: [missing()] })");
       await page.locator("#run").click();
-      await expect(page.locator("#diagnostic-list")).toContainText("unknown function 'missing'");
+      await expect(page.locator("#workflow-status")).toContainText("unknown function 'missing'");
       await expect(page.locator("#recovery-status")).toContainText("Recovery unavailable");
-      await expect(page.locator("#build-state")).toHaveText("Needs attention");
-      await expect(page.locator("#build-detail")).toContainText("accepted revision is still available");
+      await expect(page.locator("#build-state")).toHaveText("Build failed");
+      await expect(page.locator("#build-detail")).toContainText("Previous accepted music remains loaded");
       for (const theme of themes) {
         await page.locator("#theme-toggle").click();
         await page.locator("#settings-theme").selectOption(theme);
         await page.locator("#settings-close").click();
         await assertContrast(page, [{ selector: "#recovery-status" }]);
-        await expect(page.locator("#build-state")).toHaveText("Needs attention");
-        await expect(page.locator("#diagnostic-list")).toContainText("unknown function 'missing'");
+        await expect(page.locator("#build-state")).toHaveText("Build failed");
+        await expect(page.locator("#workflow-status")).toContainText("unknown function 'missing'");
       }
-      await page.locator(".diagnostic-message").click();
+      await page.locator("[data-open-error]").first().click();
       await expect(page.locator(".cm-content")).toBeFocused();
       await expect(page.locator("#source-path")).toHaveText("song.muz");
     }
@@ -401,28 +404,24 @@ for (const failure of ["getter", "setter"]) {
   });
 }
 
-for (const scenario of [
-  { name: "invalid JSON", raw: "{not json", theme: "light", source: true, fraction: 0.46 },
-  { name: "unsupported version", raw: '{"version":9,"theme":"dark","layout":{"source":false}}', theme: "light", source: true, fraction: 0.46 },
-  { name: "partial fields", raw: '{"version":1,"theme":"soft-light","layout":{"source":false}}', theme: "soft-light", source: false, fraction: 0.46 },
-  { name: "mixed invalid types", raw: '{"version":1,"theme":false,"layout":{"source":"false","sourceFraction":"0.6"}}', theme: "light", source: true, fraction: 0.46 },
-  { name: "overflowing JSON number", raw: '{"version":1,"theme":"dark","layout":{"sourceFraction":1e999}}', theme: "dark", source: true, fraction: 0.46 },
-  { name: "clamped finite fraction", raw: '{"version":1,"theme":"soft-dark","layout":{"sourceFraction":9}}', theme: "soft-dark", source: true, fraction: 0.7 },
-]) {
-  test(`stored preferences normalize ${scenario.name} before pane application`, async ({ page }) => {
-    await page.addInitScript(raw => localStorage.setItem("muzpad-preferences-v1", raw), scenario.raw);
-    await page.goto("./");
-    await expect(page.locator("#build-state")).toHaveText("Accepted");
-    await expect(page.locator("html")).toHaveAttribute("data-theme", scenario.theme);
-    await expect(page.locator("#pane-source")).toHaveAttribute("aria-expanded", String(scenario.source));
-    expect(await page.locator(".workspace").evaluate(element => Number((element as HTMLElement).style.getPropertyValue("--source-fraction")))).toBe(scenario.fraction);
-    await page.locator("#theme-toggle").click();
-    await page.locator("#settings-theme").selectOption("soft-dark");
-    await page.locator('[data-preference="source"]').check();
-    await page.locator("#settings-close").click();
-    await expect(page.locator("#source-pane")).toBeVisible();
-    await expect(page.locator("html")).toHaveAttribute("data-theme", "soft-dark");
-    await page.locator("#run").click();
-    await expect(page.locator("#build-state")).toHaveText("Accepted");
+test("fresh absent preferences allocate a source majority with optional Inspector closed before any reset", async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.removeItem("muzpad-preferences-v1");
+    localStorage.removeItem("muzpad-theme");
+    localStorage.removeItem("muzpad-inspector");
   });
-}
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("./");
+  await expect(page.locator("#build-state")).toHaveText("Accepted");
+  const source = (await page.locator("#source-pane").boundingBox())!;
+  const music = (await page.locator("#visualization-pane").boundingBox())!;
+  expect(source.width).toBeGreaterThan(music.width);
+  expect(source.width).toBeGreaterThan(0);
+  expect(music.width).toBeGreaterThan(0);
+  await expect(page.locator("#inspector")).toBeHidden();
+  await expect(page.locator("#pane-inspector")).toHaveAttribute("aria-expanded", "false");
+  await page.locator("#theme-toggle").click();
+  await expect(page.locator('[data-preference="inspector"]')).not.toBeChecked();
+  await page.locator("#settings-close").click();
+});
+

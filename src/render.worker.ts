@@ -16,16 +16,28 @@ let epoch = 0,
 const pool: ArrayBuffer[] = [];
 let analysis: string | null = null;
 let analysisEnabled = false;
+let metersEnabled = false;
+let meterHz = 20;
+let nextMeters = 0;
 let initialized = false;
 let pending: any;
 function emitAudio(fadeOut = false) {
+  const now = performance.now();
+  const meterDue = metersEnabled && now >= nextMeters;
   const meta = engine.call({
     command: "render",
     frames: 1024,
     analysis,
     analysis_enabled: analysisEnabled,
+    meters_enabled: meterDue,
     fade_out: fadeOut,
   });
+  if (!metersEnabled) meta.meters = [];
+  else if (!meterDue) delete meta.meters;
+  if (meterDue) {
+    const period = 1000 / meterHz;
+    nextMeters += (Math.floor((now - nextMeters) / period) + 1) * period;
+  }
   const audio = new Float32Array(pool.pop() ?? new ArrayBuffer(16384));
   engine.audio(1024, audio.subarray(0, 2048));
   engine.audio(1024, audio.subarray(2048), true);
@@ -135,6 +147,10 @@ self.onmessage = ({ data }) => {
           muted: data.muted,
           solo: data.solo,
         });
+      } else if (data.type === "meters") {
+        metersEnabled = data.enabled === true;
+        if (Number.isFinite(data.hz) && data.hz > 0 && data.hz <= 20) meterHz = data.hz;
+        nextMeters = performance.now();
       } else if (data.type === "analysis") {
         analysis = data.id;
         analysisEnabled = data.enabled === true;

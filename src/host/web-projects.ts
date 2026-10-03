@@ -1,6 +1,6 @@
 import { unzipSync, zipSync } from "fflate";
 import type {
-  ArchiveResult, BufferCapture, CloseInput, CloseResult, Failure, ImportInput,
+  ArchiveResult, AttemptedAction, BufferCapture, CloseInput, CloseResult, Failure, ImportInput,
   Operation, ProjectEvent, ProjectFile, ProjectRef, ProjectSettings, ProjectSnapshot,
   ProjectStore, RecentProject, RecoveryOffer, ResolvedSourceDocument, ResourceDescriptor, SaveInput,
   SaveResult, SourceConflict, SourceSnapshot, WorkingCapture,
@@ -71,7 +71,8 @@ function asFailure(value: unknown, op?: Operation, path?: string): Failure {
   if (value && typeof value === "object" && "phase" in value && "code" in value) {
     const detail = value as Failure;
     // Error.message is non-enumerable; retain it explicitly in the wire failure.
-    return { ...detail, message: detail.message };
+    const requestId = detail.requestId ?? detail.operation?.requestId ?? op?.requestId;
+    return { ...detail, message: detail.message, ...(requestId ? {requestId} : {}) };
   }
   return failure("file_write_failed", value instanceof Error ? value.message : String(value), op, path);
 }
@@ -84,9 +85,7 @@ function versionNumber(value: number) {
 function settings(value: ProjectSettings): ProjectSettings {
   if (!value || typeof value.title !== "string" || !value.title.trim()) throw error("invalid_source", "A project needs a title.");
   const entry = normalizeProjectPath(value.entry);
-  if (!/\.muz$/i.test(entry)) throw error("invalid_source", "Choose a .muz entrypoint.");
   const entries = [...new Set((value.entries ?? []).map((path) => normalizeProjectPath(path)))];
-  if (entries.some((path) => !/\.muz$/i.test(path))) throw error("invalid_source", "Entrypoints must be .muz source files.");
   return { title: value.title, entry, entries };
 }
 function settingsDirty(state: State): boolean {
@@ -195,9 +194,14 @@ export class WebProjectStore implements ProjectStore {
       try { listener(copy(event)); } catch (cause) { console.error("Project listener failed", cause); }
     }
   }
-  private emitFailure(cause: unknown, op?: Operation) {
-    if (!this.listeners.size && this.startupFailures.length < 8) this.startupFailures.push(asFailure(cause, op));
-    this.emit({ kind: "failure", project: this.current ? { project: this.current.project, epoch: this.current.epoch } : null, failure: asFailure(cause, op) });
+  private emitFailure(cause: unknown, op?: Operation, action: AttemptedAction = "recovery",
+    outcome: NonNullable<Failure["operation"]>["outcome"] = "rejected") {
+    const detail = asFailure(cause,op);
+    detail.requestId ??= op?.requestId ?? uid("project-background");
+    detail.operation ??= {action,requestId:detail.requestId,ref:null,outcome,
+      phase:detail.phase,continuity:detail.continuity,expectedRuntimeRevision:null,actualRuntimeRevision:null};
+    if (!this.listeners.size && this.startupFailures.length < 8) this.startupFailures.push(detail);
+    this.emit({ kind: "failure", project: this.current ? { project: this.current.project, epoch: this.current.epoch } : null, failure: detail });
   }
   private serial<T>(op: Operation, run: () => Promise<T>): Promise<T> {
     this.assertLive();
@@ -226,6 +230,7 @@ export class WebProjectStore implements ProjectStore {
       sourceVersion: state.sourceVersion, diskGeneration: state.diskGeneration, settingsDiskVersion: state.settingsBase.version,
       files: [...state.files.values()].map(({ base: _base, priorBase: _priorBase, ...file }) => ({ ...file })), resources,
       conflicts: copy([...state.conflicts.values()]), dirty: dirty(state), rootLabel: state.rootLabel,
+      execution: { trusted: true, policy: "sandbox" },
       ...(state.gist ? { gist: state.gist } : {}) };
   }
   private invalidate(state: State) { state.replacementAllowed = null; this.closeTokens.clear(); }
@@ -234,7 +239,6 @@ export class WebProjectStore implements ProjectStore {
     settings(stored);
     validateFiles(stored.files);
     assetTransfers(stored.assets ?? {});
-    if (!Object.hasOwn(stored.files, stored.entry) && !stored._web?.buffers.some((file) => file.path === stored.entry)) throw error("invalid_source", "The saved project has no entrypoint.");
     if (stored._web) {
       if (stored._web.buffers.length > MAX_FILES) throw error("too_large", "Recovery contains too many canonical files.");
       const ids = new Set<string>(), paths = new Set<string>();
@@ -253,7 +257,6 @@ export class WebProjectStore implements ProjectStore {
     const config = settings(value);
     validateFiles(files);
     await verifiedAssetTransfers(assets);
-    if (!(config.entry in files)) throw error("invalid_source", `Entrypoint ${config.entry} is missing.`);
     if (SETTINGS in files) throw error("invalid_source", "muzpad.json is managed through project settings.");
     for (const path of Object.keys(assets)) if (path in files) throw error("invalid_source", `Duplicate project path: ${path}`);
     const records = await Promise.all(Object.entries(files).map(async ([path, text]): Promise<[string, FileState]> => {
@@ -268,8 +271,6 @@ export class WebProjectStore implements ProjectStore {
   private async fromStored(stored: Stored, reconnect = false): Promise<State> {
     this.validateStored(stored);
     const sourceFiles = { ...stored.files };
-    // Recovery may contain a deliberately deleted entry; retain its canonical tombstone.
-    if (!(stored.entry in sourceFiles)) sourceFiles[stored.entry] = "";
     const state = await this.makeState(stored, sourceFiles, stored.assets ?? {}, null, stored._web?.settingsBase.text ?? settingsText(settings(stored)), stored.id);
     state.gist = stored._gist === undefined ? undefined : parseGist(stored._gist);
     state.rootLabel = reconnect ? stored.folderName ?? null : null;
@@ -459,9 +460,9 @@ export class WebProjectStore implements ProjectStore {
     try { parsed = raw === null ? null : JSON.parse(raw); } catch { parsed = null; }
     const metadata = parsed && typeof parsed === "object" ? parsed : {};
     const preferred = "entry" in metadata && typeof metadata.entry === "string" ? metadata.entry : "";
-    const entry = first.includes(preferred) ? preferred : first.includes("song.muz") ? "song.muz" : first[0];
+    const entry = preferred || (first.includes("song.muz") ? "song.muz" : first.includes("main.muz") ? "main.muz" : first[0]);
     const entries = "entries" in metadata && Array.isArray(metadata.entries)
-      ? metadata.entries.filter((path): path is string => typeof path === "string" && first.includes(path)) : [];
+      ? metadata.entries.filter((path): path is string => typeof path === "string") : [];
     const config = settings({ title: "title" in metadata && typeof metadata.title === "string" && metadata.title.trim() ? metadata.title : title, entry, entries });
     return this.makeState(config, source, assets, root, root ? raw : settingsText(config), project);
   }
@@ -577,6 +578,11 @@ export class WebProjectStore implements ProjectStore {
     return { kind: "library", id: `library:${libraryPath}`, path: libraryPath,
       text: this.libraries[libraryPath], documentKind: fileKind(libraryPath) };
   }
+  async trustAndRun(input: {project: ProjectRef}, op: Operation): Promise<ProjectSnapshot> {
+    abort(op);
+    const state = this.state(input.project);
+    return this.snapshot(state);
+  }
   async snapshotSources(input: WorkingCapture, op: Operation): Promise<SourceSnapshot> {
     abort(op);
     const { state, input: captured } = this.capture(input);
@@ -586,7 +592,6 @@ export class WebProjectStore implements ProjectStore {
       files: captured.buffers.filter((buffer) => buffer.text !== null).map((buffer) => ({ fileId: buffer.fileId, path: buffer.path, bufferVersion: buffer.bufferVersion, diskVersion: buffer.expectedDiskVersion })) };
     const files = { ...this.libraries, ...Object.fromEntries(captured.buffers.filter((buffer) => buffer.text !== null).map((buffer) => [buffer.path, buffer.text as string])) };
     for (const buffer of captured.buffers) if (buffer.text === null) delete files[buffer.path];
-    if (!captured.buffers.some((buffer) => buffer.path === captured.entry && buffer.text !== null)) throw error("missing_module", `Entrypoint ${captured.entry} is deleted.`, op);
     for (const file of snapshot.files) Object.freeze(file);
     Object.freeze(snapshot.files);
     Object.freeze(snapshot);
@@ -854,7 +859,7 @@ export class WebProjectStore implements ProjectStore {
             baseVersion: state.settingsBase.version, diskVersion: observedSettings.version, bufferVersion: state.sourceVersion });
         } else {
           try { state.settings = settings(JSON.parse(observedSettings.text)); state.settingsBase = observedSettings; state.conflicts.delete(settingsId); sourcesChanged = true; }
-          catch (cause) { this.emitFailure(cause, op); state.conflicts.set(settingsId, { fileId: settingsId, path: SETTINGS, base: state.settingsBase.text, local: settingsText(state.settings), disk: observedSettings.text, baseVersion: state.settingsBase.version, diskVersion: observedSettings.version, bufferVersion: state.sourceVersion }); }
+          catch (cause) { this.emitFailure(cause, op, "refresh", "partial"); state.conflicts.set(settingsId, { fileId: settingsId, path: SETTINGS, base: state.settingsBase.text, local: settingsText(state.settings), disk: observedSettings.text, baseVersion: state.settingsBase.version, diskVersion: observedSettings.version, bufferVersion: state.sourceVersion }); }
         }
       } else if (state.conflicts.delete(settingsId)) changed = true;
       if (JSON.stringify(Object.entries(state.assets).map(([path, asset]) => [path, asset.version])) !== JSON.stringify(Object.entries(disk.assets).map(([path, asset]) => [path, asset.version]))) {

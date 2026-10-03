@@ -3,7 +3,7 @@ use base64::{Engine,engine::general_purpose::STANDARD};
 use parking_lot::Mutex;
 use serde::{Deserialize,Serialize};
 use serde_json::{Value,json};
-use std::{collections::{HashMap,HashSet},path::PathBuf,sync::{Arc,Weak,atomic::{AtomicBool,AtomicU64,Ordering}},time::Duration};
+use std::{collections::{HashMap,HashSet},path::{Path,PathBuf},sync::{Arc,Weak,atomic::{AtomicBool,AtomicU64,Ordering}},time::Duration};
 use tauri::{AppHandle,Emitter,Manager};
 
 #[derive(Debug,Deserialize)]
@@ -24,6 +24,7 @@ pub enum Method {
     #[serde(rename="project.listRecent")] ListRecent, #[serde(rename="project.newProject")] NewProject,
     #[serde(rename="project.importProject")] ImportProject, #[serde(rename="project.readLibraryDocument")] ReadLibraryDocument,
     #[serde(rename="project.resolveSourceDocument")] ResolveSourceDocument,
+    #[serde(rename="project.trustAndRun")] TrustAndRun,
     #[serde(rename="project.save")] Save, #[serde(rename="project.refresh")] Refresh,
     #[serde(rename="project.resolveConflict")] ResolveConflict, #[serde(rename="project.snapshotSources")] SnapshotSources,
     #[serde(rename="project.persistRecovery")] PersistRecovery, #[serde(rename="project.restoreRecovery")] RestoreRecovery,
@@ -43,6 +44,7 @@ impl Method {
         Self::ChooseFolder=>"project.chooseFolder",Self::OpenRecent=>"project.openRecent",Self::ListRecent=>"project.listRecent",
         Self::NewProject=>"project.newProject",Self::ImportProject=>"project.importProject",Self::ReadLibraryDocument=>"project.readLibraryDocument",
         Self::ResolveSourceDocument=>"project.resolveSourceDocument",
+        Self::TrustAndRun=>"project.trustAndRun",
         Self::Save=>"project.save",Self::Refresh=>"project.refresh",Self::ResolveConflict=>"project.resolveConflict",
         Self::SnapshotSources=>"project.snapshotSources",Self::PersistRecovery=>"project.persistRecovery",Self::RestoreRecovery=>"project.restoreRecovery",
         Self::ExportArchive=>"project.exportArchive",Self::Reveal=>"project.reveal",Self::PrepareClose=>"project.prepareClose",Self::Close=>"project.close",
@@ -53,11 +55,15 @@ impl Method {
 }
 struct Active { context:Context,cancelled:Arc<AtomicBool>,snapshot:Option<String>,restarting:bool,forward:Option<Context> }
 struct AcceptedTracks { reference:Value, ids:Vec<String> }
+struct ParentEvent { context:Context,scope:String,value:Value }
+#[derive(Default)]
+struct ParentTelemetry { status:Option<ParentEvent>,analysis:Option<ParentEvent>,dropped:u64 }
 pub struct Host {
     app:AppHandle, projects:Mutex<ProjectService>, engine:Mutex<Option<Arc<Supervisor>>>,
     engine_start:Mutex<()>, snapshot_upload:Mutex<()>, engine_epoch:Mutex<String>, executable:PathBuf, cache_root:PathBuf, capabilities:Mutex<Value>, transfers:Mutex<Transfers>,
     active:Mutex<HashMap<String,Active>>, exports:Mutex<HashMap<String,String>>, lifecycle:Mutex<()>, accepted:Mutex<Option<AcceptedTracks>>,
     sequence:AtomicU64, disposed:AtomicBool, close_ticket:Mutex<Option<(String,String)>>, weak:Weak<Host>,
+    events:std::sync::mpsc::SyncSender<ParentEvent>,telemetry:Arc<Mutex<ParentTelemetry>>,
 }
 fn bad(message:impl Into<String>)->Failure{Failure::new("stale_request","engine",message)}
 fn field<'a>(value:&'a Value,key:&str)->Result<&'a str,Failure>{value.get(key).and_then(Value::as_str).ok_or_else(||bad(format!("Missing string field {key}")))}
@@ -85,10 +91,26 @@ impl Host {
         let service=ProjectService::new(data,config,resource,Arc::new(move|value|{
             if let Some(host)=callback_holder.lock().upgrade(){host.emit_project(value);}
         }))?;
+        let (events,receiver)=std::sync::mpsc::sync_channel::<ParentEvent>(128);
+        let telemetry=Arc::new(Mutex::new(ParentTelemetry::default()));let writer_telemetry=telemetry.clone();
         let host=Arc::new_cyclic(|weak|Self{app,projects:Mutex::new(service),engine:Mutex::new(None),engine_start:Mutex::new(()),snapshot_upload:Mutex::new(()),engine_epoch:Mutex::new(uuid::Uuid::new_v4().to_string()),executable,cache_root,
             capabilities:Mutex::new(protocol::capabilities("")),transfers:Mutex::new(Transfers::default()),active:Mutex::new(HashMap::new()),
-            exports:Mutex::new(HashMap::new()),lifecycle:Mutex::new(()),accepted:Mutex::new(None),sequence:AtomicU64::new(0),disposed:AtomicBool::new(false),close_ticket:Mutex::new(None),weak:weak.clone()});
-        *holder.lock()=Arc::downgrade(&host);Ok(host)
+            exports:Mutex::new(HashMap::new()),lifecycle:Mutex::new(()),accepted:Mutex::new(None),sequence:AtomicU64::new(0),disposed:AtomicBool::new(false),close_ticket:Mutex::new(None),weak:weak.clone(),events,telemetry});
+        *holder.lock()=Arc::downgrade(&host);
+        let weak=Arc::downgrade(&host);
+        std::thread::Builder::new().name("muzpad-parent-events".into()).spawn(move||{
+            loop {
+                let event=match receiver.recv_timeout(Duration::from_millis(3)) {
+                    Ok(event)=>Some(event),Err(std::sync::mpsc::RecvTimeoutError::Timeout)=>None,Err(std::sync::mpsc::RecvTimeoutError::Disconnected)=>break,
+                };
+                let Some(host)=weak.upgrade()else{break;};
+                if let Some(event)=event {host.emit_now(event);}
+                while let Ok(event)=receiver.try_recv(){host.emit_now(event);}
+                let (status,analysis)={let mut pending=writer_telemetry.lock();(pending.status.take(),pending.analysis.take())};
+                for event in [status,analysis].into_iter().flatten(){host.emit_now(event);}
+            }
+        })?;
+        Ok(host)
     }
     fn context(&self)->Context {Context::host(Some(self.engine_epoch.lock().clone()),None)}
     fn retain_accepted(&self,value:&Value){
@@ -99,9 +121,30 @@ impl Host {
         }
     }
     fn emit(&self,context:&Context,scope:&str,value:Value){
-        let value=match self.transfers.lock().outgoing(context,value){Ok(value)=>value,Err(failure)=>json!({"kind":"failure","failure":failure})};
+        let event=ParentEvent{context:context.clone(),scope:scope.into(),value};
+        let mut pending=self.telemetry.lock();
+        if scope=="runtime"&&matches!(event.value["kind"].as_str(),Some("status"|"analysis")) {
+            if event.value["kind"]=="analysis" {
+                if pending.analysis.is_some(){pending.dropped=pending.dropped.saturating_add(1);}
+                let mut event=event;let dropped=event.value["frame"]["dropped"].as_str().and_then(|value|value.parse::<u64>().ok()).unwrap_or(0);
+                event.value["frame"]["dropped"]=json!(dropped.saturating_add(pending.dropped).to_string());pending.analysis=Some(event);
+            }else{pending.status=Some(event);}
+            return;
+        }
+        let barrier=protocol::event_barrier(scope,&event.value);
+        if barrier {pending.status=None;pending.analysis=None;}
+        let _=self.events.send(event);
+    }
+    fn emit_now(&self,event:ParentEvent){
+        if event.scope=="runtime"&&matches!(event.value["kind"].as_str(),Some("status"|"analysis")) {
+            let reference=if event.value["kind"]=="analysis"{&event.value["frame"]["ref"]}else{&event.value["status"]["ref"]};
+            if self.accepted.lock().as_ref().is_none_or(|accepted|accepted.reference!=*reference)||event.context.engine_epoch.as_ref()!=Some(&*self.engine_epoch.lock()){return;}
+        }
+        let barrier=protocol::event_barrier(&event.scope,&event.value);
+        let value=match self.transfers.lock().outgoing(&event.context,event.value){Ok(value)=>value,Err(failure)=>json!({"kind":"failure","failure":failure})};
         let sequence=self.sequence.fetch_add(1,Ordering::Relaxed);
-        let _=self.app.emit_to("main","workbench://event",protocol::event(context,sequence,scope,value));
+        let mut envelope=protocol::event(&event.context,sequence,&event.scope,value);envelope["barrier"]=json!(barrier);
+        let _=self.app.emit_to("main","workbench://event",&envelope);
     }
     fn emit_project(&self,value:Value){
         let mut context=self.context();
@@ -116,14 +159,15 @@ impl Host {
             let weak=self.weak.clone();std::thread::spawn(move||{
                 let Some(host)=weak.upgrade()else{return;};
                 let Some(snapshot)=value["snapshot"].as_str()else{return;};let Some(target)=value["requestId"].as_str()else{return;};
-                let restarting=host.active.lock().get(target).is_some_and(|request|request.restarting&&request.snapshot.as_deref()==Some(snapshot));
+                let restarting=host.active.lock().get(target).is_some_and(|request|request.restarting&&request.snapshot.as_deref()==Some(snapshot))
+                    ||(value["retained"]==true&&host.accepted.lock().as_ref().is_some_and(|accepted|accepted.reference==value["ref"]));
                 let validation={
                     let projects=host.projects.lock();
                     if restarting{projects.validate_retained_snapshot(snapshot,&value["dependencyVersions"])}
                     else{projects.validate_snapshot(snapshot,&value["dependencyVersions"])}
                 };
                 let Ok(engine)=host.engine_for(&context)else{return;};let mut authorization=context.clone();authorization.request_id=uuid::Uuid::new_v4().to_string();
-                let _=engine.request(&authorization,"authorizeApply",json!({"target":target,"allowed":validation.is_ok(),"failure":validation.err()}));
+                let _=engine.request(&authorization,"authorizeApply",json!({"target":target,"authorization":value["authorization"],"allowed":validation.is_ok(),"failure":validation.err()}));
             });return;
         }
         if scope!="runtime"{return;}
@@ -173,6 +217,27 @@ impl Host {
         if let Some(project)=context.project.as_ref(){if self.projects.lock().current_ref().as_ref()!=Some(project){return Err(bad("Obsolete project epoch"));}}
         Ok(())
     }
+    fn preview_runtime_context(&self,method:Method,context:&Context)->bool {
+        if !matches!(method,Method::Transport|Method::Audition|Method::Analysis|Method::Inspect|Method::Explain|Method::Location|Method::Diff|Method::Export){return false;}
+        if !self.projects.lock().is_preview(){return false;}
+        self.accepted.lock().as_ref().is_some_and(|accepted|{
+            let reference=&accepted.reference;context.engine_epoch.as_deref()==reference["engineEpoch"].as_str()
+                &&context.revision.as_deref()==reference["revision"].as_str()&&context.source_version==reference["sourceVersion"].as_u64()
+                &&context.project.as_ref().is_some_and(|project|reference["project"]==project.project&&reference["epoch"]==project.epoch)
+        })
+    }
+    fn accepted_document(&self,context:&Context,input:&Value,path:&str)->Result<Option<Value>,Failure>{
+        let projects=self.projects.lock();
+        if input["project"].is_null(){return Ok(None);}
+        if project_ref(&input["project"])!=projects.current_ref(){return Err(bad("Readonly document targets an obsolete project"));}
+        projects.require_trusted()?;drop(projects);
+        let reference=self.accepted.lock().as_ref().map(|accepted|accepted.reference.clone());
+        let Some(reference)=reference.filter(|reference|project_ref(reference)==project_ref(&input["project"]))else{return Ok(None);};
+        let mut request=context.clone();request.project=project_ref(&reference);request.engine_epoch=reference["engineEpoch"].as_str().map(str::to_owned);
+        request.revision=reference["revision"].as_str().map(str::to_owned);request.source_version=reference["sourceVersion"].as_u64();
+        let result=self.engine_for(&request)?.request(&request,"sourceDocument",json!({"ref":reference,"path":path}))?;
+        Ok((!result.is_null()).then_some(result))
+    }
     fn engine_for(&self,context:&Context)->Result<Arc<Supervisor>,Failure>{
         let engine=self.engine.lock().clone().ok_or_else(||Failure::new("child_died","engine","Native engine is not running").lost())?;
         if context.engine_epoch.as_deref()!=Some(engine.epoch.as_str()){return Err(bad("Obsolete engine epoch"));}Ok(engine)
@@ -182,7 +247,8 @@ impl Host {
             if matches!(request.method,Method::TransferRead|Method::TransferRelease){
                 context.validate()?;
                 if let Some(epoch)=context.engine_epoch.as_ref(){if &*self.engine_epoch.lock()!=epoch{return Err(bad("Obsolete transfer engine epoch"));}}
-            }else{self.validate_context(&context)?;}
+            }else if self.preview_runtime_context(request.method,&context){context.validate()?;if self.disposed.load(Ordering::Acquire){return Err(bad("Host already disposed"));}}
+            else{self.validate_context(&context)?;}
             let cancelled=Arc::new(AtomicBool::new(false));{
                 let mut active=self.active.lock();if active.len()>=64{return Err(Failure::new("queue_full","engine","Outstanding request limit reached"));}
                 if active.contains_key(&context.request_id){return Err(bad("Duplicate request identity"));}
@@ -202,11 +268,11 @@ impl Host {
     }
     fn snapshot_to_child(&self,engine:&Supervisor,context:&Context,id:&str)->Result<Value,Failure>{
         let _upload=self.snapshot_upload.lock();
-        let (snapshot,files,grants)={let projects=self.projects.lock();let (snapshot,files)=projects.snapshot_transfer(id)?;(snapshot,files,projects.read_grants())};
+        let (snapshot,files,bindings,trusted)={let projects=self.projects.lock();let (bindings,trusted)=projects.snapshot_read_policy(id)?;if !trusted{return Err(Failure::new("trust_required","compile","Imported previews cannot evaluate source code"));}let (snapshot,files)=projects.snapshot_transfer(id)?;(snapshot,files,bindings,trusted)};
         let mut private=context.clone();private.request_id=uuid::Uuid::new_v4().to_string();
         let project=project_ref(&snapshot).ok_or_else(||bad("Snapshot has no project identity"))?;
         private.project=Some(project.clone());private.source_version=snapshot["sourceVersion"].as_u64();
-        engine.request(&private,"configureProject",json!({"project":project,"readGrants":grants}))?;
+        engine.request(&private,"configureProject",json!({"project":project,"readBindings":bindings,"trustedRead":trusted}))?;
         private.request_id=uuid::Uuid::new_v4().to_string();
         engine.request(&private,"snapshotBegin",json!({"snapshot":snapshot,"files":files.iter().map(|(d,_)|d).collect::<Vec<_>>(),"entry":snapshot["entry"]}))?;
         for (descriptor,text) in &files{for (index,chunk) in text.as_bytes().chunks(protocol::CHUNK_BYTES).enumerate(){
@@ -237,29 +303,55 @@ impl Host {
             },
             Method::Dispose=>{if !self.projects.lock().close_allowed(){return Err(bad("Close permission has not been granted"));}self.shutdown()?;Ok(Value::Null)},
             Method::RuntimeDispose=>{let previous=self.engine.lock().take();if let Some(engine)=previous{engine.shutdown();}*self.accepted.lock()=None;Ok(Value::Null)},
+            Method::ReadLibraryDocument|Method::ResolveSourceDocument=>{
+                let input=&value["input"];
+                let path=if matches!(method,Method::ReadLibraryDocument){field(input,"id")?.strip_prefix("library:").unwrap_or(field(input,"id")?)}else{field(input,"path")?};
+                if !self.projects.lock().owns_source_path(path) {
+                    if let Some(document)=self.accepted_document(context,input,path)? {
+                        let canonical=field(&document,"path")?;let kind=document_kind(canonical);
+                        return Ok(if matches!(method,Method::ReadLibraryDocument) {json!({"id":input["id"],"path":canonical,"text":document["text"],"kind":kind})}
+                            else {json!({"kind":"library","id":format!("library:{canonical}"),"path":canonical,"text":document["text"],"documentKind":kind})});
+                    }
+                }
+                self.projects.lock().dispatch(method.name(),value,context)
+            },
             Method::Rebuild|Method::CheckEntries=>{
+                self.projects.lock().require_trusted()?;
                 let engine=self.engine_for(context)?;self.snapshot_to_child(&engine,context,field(&value,"snapshot")?)?;
                 if matches!(method,Method::Rebuild){if let Some(request)=self.active.lock().get_mut(&context.request_id){request.snapshot=Some(field(&value,"snapshot")?.to_owned());}}
                 if cancelled.load(Ordering::Acquire){return Err(Failure::new("cancelled","compile","Build cancelled before compilation"));}
-                let result=match engine.request(context,if matches!(method,Method::Rebuild){"rebuild"}else{"checkEntries"},value){
-                    Ok(result)=>result,
-                    Err(mut failure)=>{
-                        if failure.code=="grant_required"&&matches!(method,Method::Rebuild)&&!cancelled.load(Ordering::Acquire){
-                            if let Some(required)=failure.path.as_deref(){
-                                if std::path::Path::new(required).is_absolute()&&self.projects.lock().choose_library_grant(required)?{
-                                    failure.help.get_or_insert_with(Vec::new).push("Read access granted. Rebuild again to capture and compile the authorized library.".into());
-                                }
-                            }
-                        }
+                let result=engine.request(context,if matches!(method,Method::Rebuild){"rebuild"}else{"checkEntries"},value)?;
+                if matches!(method,Method::Rebuild){self.retain_accepted(&result);}Ok(result)
+            },
+            Method::ImportProject|Method::RestoreRecovery=>{
+                let _lifecycle=self.lifecycle.lock();
+                let staged={let mut projects=self.projects.lock();if matches!(method,Method::ImportProject){projects.stage_import(value["input"].clone())?}else{projects.stage_recovery(&value["input"])?}};
+                if !staged{return Ok(Value::Null);}
+                let engine=self.engine.lock().clone().filter(|engine|engine.is_alive());
+                if let Some(engine)=&engine {
+                    if let Err(failure)=engine.request(context,"preparePreview",Value::Null) {
+                        self.projects.lock().discard_staged_project();
+                        let mut resume=context.clone();resume.request_id=uuid::Uuid::new_v4().to_string();let _=engine.request(&resume,"resumeProject",Value::Null);
                         return Err(failure);
                     }
-                };
-                if matches!(method,Method::Rebuild){self.retain_accepted(&result);}Ok(result)
+                }
+                if cancelled.load(Ordering::Acquire){
+                    self.projects.lock().discard_staged_project();
+                    if let Some(engine)=engine {let mut resume=context.clone();resume.request_id=uuid::Uuid::new_v4().to_string();let _=engine.request(&resume,"resumeProject",Value::Null);}
+                    return Err(Failure::new("cancelled","project","Project transition cancelled before publication"));
+                }
+                let result=self.projects.lock().install_staged_project();
+                if result.is_err(){if let Some(engine)=engine{let mut resume=context.clone();resume.request_id=uuid::Uuid::new_v4().to_string();let _=engine.request(&resume,"resumeProject",Value::Null);}}
+                if result.is_ok()&&self.projects.lock().trusted_read(){self.reset_project_runtime();}
+                result
             },
             Method::Format|Method::Inspect|Method::Explain|Method::Location|Method::Diff=>{
                 let name=method.name();self.engine_for(context)?.request(context,name.strip_prefix("runtime.").expect("runtime method"),value)
             },
             Method::Transport=>{
+                if self.projects.lock().is_preview()&&!matches!(value["command"]["kind"].as_str(),Some("play"|"pause"|"stop"|"panic")){
+                    return Err(Failure::new("trust_required","transport","Score-bound transport is disabled while imported content is a preview"));
+                }
                 let command=value.get_mut("command").ok_or_else(||bad("Missing transport command"))?;
                 match command["kind"].as_str(){Some("seek")=>{let tick=beat_ticks(&command["beat"])?;*command=json!({"kind":"seek","tick":tick.to_string()});},
                     Some("loop")=>{if !command["range"].is_null(){let range=command["range"].as_array().filter(|a|a.len()==2).ok_or_else(||bad("Invalid loop range"))?;let a=beat_ticks(&range[0])?;let b=beat_ticks(&range[1])?;if a>=b{return Err(bad("Loop range must be increasing"));}command["range"]=json!([a.to_string(),b.to_string()]);}},
@@ -267,6 +359,7 @@ impl Host {
                 self.engine_for(context)?.request(context,"transport",value)
             },
             Method::Audition=>{
+                if self.projects.lock().is_preview(){return Err(Failure::new("trust_required","transport","Listening edits are disabled while imported content is a preview"));}
                 let ids:Vec<String>={
                     let guard=self.accepted.lock();let accepted=guard.as_ref().ok_or_else(||Failure::new("expired_revision","transport","No accepted native revision"))?;
                     if value["ref"]!=accepted.reference{return Err(Failure::new("stale_revision","transport","Listening request targets a previous revision"));}
@@ -301,21 +394,26 @@ impl Host {
                 if self.disposed.load(Ordering::Acquire){return Err(bad("Host closed before project operation"));}
                 let previous=self.projects.lock().current_ref();
                 let result=self.projects.lock().dispatch(&method.name(),value,context)?;
-                if self.projects.lock().current_ref()!=previous{self.reset_project_runtime();}
+                let (current,trusted)={let projects=self.projects.lock();(projects.current_ref(),projects.trusted_read())};
+                if matches!(method,Method::TrustAndRun) {
+                    let retained=current.is_none()||self.accepted.lock().as_ref().is_some_and(|accepted|project_ref(&accepted.reference)==current);
+                    if retained {if let Some(engine)=self.engine.lock().clone().filter(|engine|engine.is_alive()){let mut resume=context.clone();resume.request_id=uuid::Uuid::new_v4().to_string();resume.engine_epoch=Some(engine.epoch.clone());engine.request(&resume,"resumeProject",Value::Null)?;}}
+                    else if trusted {self.reset_project_runtime();}
+                }else if current!=previous&&trusted {self.reset_project_runtime();}
                 Ok(result)
             },
         }
     }
     fn reset_project_runtime(&self){
         *self.accepted.lock()=None;
-        let (project,grants)={let service=self.projects.lock();let project=service.current_ref();let grants=if project.is_some(){service.read_grants()}else{Vec::new()};(project,grants)};
+        let (project,bindings,trusted)={let service=self.projects.lock();let project=service.current_ref();let bindings=if project.is_some(){service.read_bindings()}else{Vec::new()};(project,bindings,service.trusted_read())};
         let engine=self.engine.lock().clone();
         let Some(engine)=engine.filter(|e|e.is_alive())else{return;};
         // A fresh grantless private identity retires a closed workspace without
         // restarting the process or invalidating the public close reply's epoch.
         let project=project.unwrap_or_else(||ProjectRef{project:uuid::Uuid::new_v4().to_string(),epoch:uuid::Uuid::new_v4().to_string()});
         let context=Context::host(Some(engine.epoch.clone()),Some(project.clone()));
-        if let Err(failure)=engine.request_timeout(&context,"configureProject",json!({"project":project,"readGrants":grants}),Some(Duration::from_secs(5))){
+        if let Err(failure)=engine.request_timeout(&context,"configureProject",json!({"project":project,"readBindings":bindings,"trustedRead":trusted}),Some(Duration::from_secs(5))){
             engine.shutdown();self.emit(&context,"runtime",json!({"kind":"failure","failure":failure}));
         }
     }
@@ -348,7 +446,8 @@ impl Host {
         let restarting=request.restarting;
         let mut forward=request.forward.clone().unwrap_or_else(||request.context.clone());
         let cancelled=request.cancelled.clone();drop(active);
-        if !restarting{self.validate_context(context)?;}
+        let preview_owned={let projects=self.projects.lock();projects.is_preview()&&projects.preview_project()==context.project&&context.engine_epoch.as_ref()==Some(&*self.engine_epoch.lock())};
+        if !restarting&&!preview_owned{self.validate_context(context)?;}
         // Only this registered recovery request may cross its own epoch change;
         // unrelated stale-epoch cancellation remains rejected.
         cancelled.store(true,Ordering::Release);
@@ -412,3 +511,4 @@ fn open_external(url:&str)->Result<(),Failure>{let parsed=url::Url::parse(url).m
 
 struct ExportAdmission<'a>{jobs:&'a Mutex<HashMap<String,String>>,id:String}
 impl Drop for ExportAdmission<'_>{fn drop(&mut self){self.jobs.lock().remove(&self.id);}}
+fn document_kind(path:&str)->&'static str{match Path::new(path).extension().and_then(|value|value.to_str()).unwrap_or("").to_ascii_lowercase().as_str(){"muz"=>"source","md"|"markdown"=>"document",_=>"text"}}

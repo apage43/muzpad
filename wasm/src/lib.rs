@@ -205,7 +205,24 @@ impl Host {
                 self.assets.retain(|path, _| keep.contains(path));
                 Ok(json!({"assets":keep.len()}))
             }
-            "compile" | "check_entry" => {
+            "check_entry" => {
+                let files: BTreeMap<String, String> = serde_json::from_value(v["files"].clone())?;
+                let entry = v["entry"].as_str().ok_or_else(|| anyhow::anyhow!("choose an entry file"))?;
+                let result = muz::lang::classify_root_with_context(
+                    Path::new(entry), Rc::new(Files(files)), &self.context,
+                )?;
+                Ok(match result {
+                    muz::lang::RootClassification::Song { .. } =>
+                        json!({"kind":"song","failure":null}),
+                    muz::lang::RootClassification::NonSong { description, .. } =>
+                        json!({"kind":"non-song","description":description,"failure":null}),
+                    muz::lang::RootClassification::Unresolved { error } =>
+                        json!({"kind":"unresolved","failure":error.downcast_ref::<muz::lang::Diagnostic>()
+                            .map(|diagnostic| diagnostic.to_json())
+                            .unwrap_or_else(|| json!({"message":format!("{error:#}")}))}),
+                })
+            }
+            "compile" => {
                 self.context.provenance = true;
                 let files: BTreeMap<String, String> = serde_json::from_value(v["files"].clone())?;
                 let entry = v["entry"]
@@ -216,9 +233,6 @@ impl Host {
                     Rc::new(Files(files)),
                     &self.context,
                 )?;
-                if v["command"] == "check_entry" {
-                    return Ok(json!({"valid": true}));
-                }
                 self.compile_revision += 1;
                 let snapshot = self
                     .context
@@ -530,7 +544,8 @@ impl Host {
                 if e.status().ended {
                     self.ended_frames += frames as u64;
                 }
-                let meters: Vec<_> = (0..e.track_count())
+                let meter_tracks = if v["meters_enabled"].as_bool().unwrap_or(true) { e.track_count() } else { 0 };
+                let meters: Vec<_> = (0..meter_tracks)
                     .map(|i| {
                         let (id, l, r, _) = e.track_audio(i);
                         let peak = l[..frames]
@@ -669,4 +684,44 @@ pub extern "C" fn pcm_ptr() -> *const f32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn analysis_ptr() -> *const f32 {
     HOST.with_borrow(|h| h.analysis.as_ptr())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn entry_command_evaluates_roots_without_compiling_or_preparing() {
+        let mut host = Host::default();
+        host.call(json!({"command":"asset_manifest","entries":[]})).unwrap();
+        for source in [
+            "song({tracks:[]})",
+            "let main = song({tracks:[]}); null",
+            "{type:\"song\",tracks:false}",
+            "song({tracks:[track(\"a\",note(60),sample(\"missing.wav\"))]})",
+            "song({tracks:[track(\"a\",note(60),plugin(\"not-installed\"))]})",
+            "use \"part.muz\" as p; p.make()",
+        ] {
+            let result = host.call(json!({"command":"check_entry","entry":"root.MUZ","files":{
+                "root.MUZ":source,"part.muz":"let make = fn() => song({tracks:[]});",
+            }})).unwrap();
+            assert_eq!(result["kind"], "song", "{source}");
+            assert!(host.candidate.is_none());
+            assert!(host.pending.is_none());
+            assert!(host.engine.is_none());
+            assert_eq!(host.compile_revision, 0);
+        }
+        for source in ["null","note(60)","{type:\"pattern\"}","\"song({tracks:[]})\""] {
+            let result = host.call(json!({"command":"check_entry","entry":"root.muz","files":{"root.muz":source}})).unwrap();
+            assert_eq!(result["kind"], "non-song");
+            assert!(result["description"].is_string());
+        }
+        for source in ["{", "use \"absent.muz\" as p; p.main", "use \"/outside.muz\" as p; p.main"] {
+            let result = host.call(json!({"command":"check_entry","entry":"root.muz","files":{"root.muz":source}})).unwrap();
+            assert_eq!(result["kind"], "unresolved");
+            assert!(result["failure"]["message"].is_string());
+        }
+        host.context.cancelled.store(true, std::sync::atomic::Ordering::Release);
+        assert!(host.call(json!({"command":"check_entry","entry":"root.muz","files":{"root.muz":"null"}})).is_err());
+    }
 }

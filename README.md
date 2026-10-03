@@ -20,13 +20,17 @@ npm run prepare:engine
 npm run dev
 ```
 
-Open the URL printed by Vite. Start with the new project, use **Open gist** to
-load source from GitHub, or choose a Gists sidebar link when configured.
-Imported gists compile locally on opening; press Play to enable browser audio. Every project open or reload
-automatically builds, including local folders, ZIPs, new projects, and recovered drafts. Rebuild, or Cmd/Ctrl+Enter in the editor, accepts a new source
-revision. Invalid edits retain the previous accepted session. Compatible edits
-retain the rendering engine, held voices and matching processor state; structural
-changes use the engine's reconciliation decisions and cutover fades.
+Open the URL printed by Vite. Start with the new project, use **Import from gist**
+to load source from GitHub, or choose a Gists sidebar link when configured.
+Browser imports compile locally on opening; press Play to enable browser audio.
+Deliberately opened native folders use your account's ordinary read authority.
+Native gist/ZIP imports and untrusted recovery are nonexecuting previews until a
+parent-owned **Trust and run** confirmation. Cancel preserves the previous
+workspace and accepted music; imported metadata cannot grant trust.
+Rebuild, or Cmd/Ctrl+Enter in the editor, accepts a new source revision. Invalid
+edits retain the previous accepted session. Compatible edits retain the rendering
+engine, held voices and matching processor state; structural changes use the
+engine's reconciliation decisions and cutover fades.
 
 ## Workspace
 
@@ -44,9 +48,12 @@ changes use the engine's reconciliation decisions and cutover fades.
 - The header distinguishes **Folder connected** from **Browser copy** or **Native
   working copy**, shows the folder's unsaved-file count, and groups current-workspace
   actions separately from opening other projects. Gist copies explicitly say that edits stay local.
-- Connect a folder where the host supports writable directory access. **Save to
-  folder** (Cmd/Ctrl+S) writes changed buffers and entry metadata, including new
-  nested source files. Unsaved-to-disk and edited-since-build are separate states.
+- Native **Open folder…** opens a local project. Browser **Connect folder…**
+  authorizes a writable directory; **Import folder copy…** imports a disconnected
+  copy whose edits are not written back (export ZIP to retain them).
+  **Save to folder** (Cmd/Ctrl+S) writes changed buffers and entry metadata,
+  including new nested source files. Unsaved-to-disk and edited-since-build are
+  separate states.
   Saves check disk baselines before writing; a failed save never grants close.
 - **Reload** checks the connected folder, including added/deleted files. Clean
   changes refresh their buffers; overlapping local/disk changes offer **Use disk**,
@@ -85,30 +92,46 @@ changes use the engine's reconciliation decisions and cutover fades.
   own Cmd/Ctrl+W behavior. Desktop Cmd/Ctrl+O opens a folder; Cmd/Ctrl+, opens Settings.
   Desktop Cmd/Ctrl+N creates a project through the same safety gate; Cmd/Ctrl+Enter
   rebuilds outside dialogs.
-- Editor undo/redo, selections and scroll, and Markdown scroll/details are retained
-  while closing/reopening views in a live project. Explicit source/fragment links
-  take precedence. This does not promise cross-launch undo, cursor or tab-history
-  persistence; recovery stores canonical buffers, not serialized editor history.
-- Collapse Explorer, Source, Visualization or Inspector using pane controls; the
-  always-visible **Panes** toolbar restores them, even with every pane hidden.
-  Restoring Inspector also reveals Visualization. Hidden views retain navigation,
-  zoom, selection, audition, loop and follow preferences. At narrow widths visible
-  panes stack without empty tracks. Drag or keyboard-resize the source separator
-  (arrows, Home/End); its preferred 25–70% fraction persists.
-- **Settings** applies theme and pane choices immediately. **Reset layout** restores
-  all panes and the 46% source fraction without changing music or theme. Preferences
+- Project, Export and View menus close after a command is activated. Focus returns
+  to their visible summary unless the command already focused its dialog or pane.
+- Desktop Cmd/Ctrl+Plus or Minus and Cmd/Ctrl+mouse wheel change actual page zoom,
+  independently of the arrangement's musical zoom.
+- Editor undo/redo, selections, scroll and folds, and Markdown scroll/details are
+  retained while closing/reopening views in a live project. Indented multiline
+  source folds use the gutter or Ctrl+Shift+[ / Ctrl+Shift+] (Cmd+Alt on macOS).
+  Explicit source/fragment links take precedence. This does not promise cross-launch
+  undo, cursor or tab-history persistence; recovery stores canonical buffers,
+  not serialized editor history.
+- Desktop **View** commands restore collapsed Explorer, Source, Music or Inspector;
+  Settings exposes the same choices. Hidden views retain navigation, zoom,
+  selection, audition, loop and follow preferences. Narrow layouts use one
+  Source/Music surface and a temporary Explorer drawer, without overwriting saved
+  desktop visibility. Inspector and analysis scroll within Music, including short
+  windows. Drag or keyboard-resize the source separator (arrows, Home/End); its
+  preferred 25–70% fraction persists.
+- **Settings** applies theme and pane choices immediately. New/reset layouts give
+  source 60% of the area remaining after Explorer and keep optional Inspector
+  closed; genuine saved layouts remain unchanged. **Reset layout** preserves music
+  and theme. Preferences
   live separately from projects/ZIPs/gists/recovery text, in guarded browser storage
   or native app configuration. **Preferences are temporary** reports storage failure
   without blocking editing or masking engine diagnostics. Keyboard focus stays
   within Settings until it closes. Escape returns focus to its invoker or a safe
   global control; a queued close event never takes focus back from a newly chosen control.
-- The Entrypoints chooser lists only files the compiler validates as playable entry
-  points, with declared entries first. Validation refreshes after source edits.
-  Changing entrypoint does not rebuild automatically. A notice names the selected
-  entrypoint and the still-active one until Rebuild accepts the change.
-- Play/pause, stop, restart, seek on the ruler or by section, and loop a section
-  or an explicit beat range. Range values use zero-based musical beats. **Panic**
-  releases sounding voices through the host's acknowledged transport operation.
+- The Entrypoints chooser separates evaluated **song**, **non-song**, and
+  **unresolved** source kind from unchecked, validated or blocked build readiness.
+  Discovery evaluates roots/imports but does not lower, pin plugins/samples or
+  prepare audio. Declared/selected missing or non-song entries remain visible with
+  reasons alongside alternatives; a cancelled scan is not “no entries.”
+  Changing entrypoint does not rebuild automatically. Selected and accepted
+  entries remain distinct until Rebuild accepts the change.
+- Play/pause, Stop, **Return to start**, seek on the ruler or by section, and loop
+  a section or explicit beat range. Range values use zero-based musical beats.
+  **Panic** releases sounding voices through the acknowledged transport operation.
+  Build, playback, Save, recovery and other operation outcomes have independent,
+  actionable status; healthy playback cannot clear a failed Save. Technical
+  details retain exact native tickets and request identities. Stop can report
+  paused-but-not-rewound partial success rather than claiming full success.
 - Use **M** and **S** beside arrangement tracks to mute or solo temporarily.
   Multiple solos combine; mute takes precedence. Kit-group buttons act on their
   explicit lanes (a dashed button means some lanes are enabled). Controls survive
@@ -119,18 +142,26 @@ changes use the engine's reconciliation decisions and cutover fades.
   without seeking or restarting playback.
 - Inspect arrangement notes, note performance data, routing, native voice graphs,
   automation curves, master/track peak meters, and output waveform/spectrum.
+  Accepted **Revision details** remain accessible after project replacement or
+  Rebuild; the first accepted revision explains that no comparison exists yet.
+  Automation values/cursors update only against the exact revision and lane model
+  that produced their visible curve; Rebuild stages new data independently.
 - Select a track to analyze its output, or choose Master in the analysis menu.
-  The analysis signal is separate from the audible mix. Hiding Inspector does not
-  hide analysis; hiding Visualization suspends detailed capture/drawing. Contrib
-  folders show sample/plugin requirements. Browser hosts cannot run native plugins;
-  native hosts report supported formats and use installed authorized resources.
+  The analysis signal is separate from the audible mix. Detailed peak/RMS describe
+  the same selected unwindowed mono history, not master meters. Losing matching
+  worklet readiness immediately returns the display to fresh-window loading rather
+  than repainting an old measurement. Hiding Inspector does not hide analysis;
+  hiding Visualization suspends detailed capture/drawing. Contrib folders show
+  sample/plugin requirements. Browser hosts cannot run native plugins; native
+  hosts report supported formats and use installed authorized resources.
 - Click a diagnostic or the related-source action to navigate to a declaration.
-  Source attribution is best effort for generated material. Graph links refer
-  to the accepted revision; unsaved edits can move those source lines.
-  Native absolute source identities resolve through the host to existing editable
-  project buffers or already-authorized read-only library documents. Diagnostic,
-  graph and note-provenance navigation does not infer a file from its basename or
-  grant new filesystem access; read-only documents keep their identity on reopen.
+  Availability uses direct accepted-source lookup independently of displayed
+  location pages; later file/tab intent wins over delayed lookup/document replies.
+  Generated material has an explanation instead of an enabled no-op. Graph links
+  refer to accepted music, and dirty working text can move those source lines.
+  Native canonical source identities resolve to existing editable buffers or
+  readonly pinned/account-readable documents, never basename guesses or writable
+  external aliases. Readonly documents retain their identity on reopen.
 - Import a gist URL or ID. The page URL gains `?gist=ID` so it can be shared;
   `?gist=ID/REVISION` pins a particular version. A gist workspace has a **View gist**
   link in place of the project download button. Edits remain local and are not
@@ -167,18 +198,26 @@ changes use the engine's reconciliation decisions and cutover fades.
 
 Visualizations are read only. Selecting notes or graph objects does not edit the
 music. Scope and spectrum show actual selected output; note marks show compiled
-performance, not measured audio. Analysis uses actual mono-downmixed output;
-track analysis and meters measure output before routing to buses. Switching
-analysis clears old capture without restarting playback or changing the audible
-mix. Paused meters clear; no synthetic native waveform or silent-clock fallback
-stands in for unavailable audio.
+performance, not measured audio. Analysis uses mono `(L+R)/2`, so antiphase stereo
+can cancel; track analysis and meters measure output before routing to buses.
+Detail uses a full contiguous 2048-sample window, with source/revision/generation
+resets and warmup. Native spectra use periodic Hann coherent gain 0.5 and include
+DC/Nyquist; browser spectra use periodic Blackman gain 0.42 and omit Nyquist.
+Linear peak amplitude 1 is 0 dBFS; frequency is `bin*sampleRate/2048`.
+Acquisition negotiates at most 30 Hz detail and independently at most 20 Hz meters,
+not a universal achieved-rate guarantee. Hidden detail disconnects/suspends
+capture and drawing without stopping audio/meters. Native exclusive window-end
+sample counters are rendered sample clocks, not DAC timestamps; Web Audio does
+not expose the exact analyser window end. Paused meters clear; no synthetic
+waveform or silent-clock fallback stands in for unavailable audio.
 
 Kit tracks appear as collapsible groups with compact named voice lanes. At close
 zoom, diamonds mark performed hit onsets; size and shade show attack velocity.
-At wide zoom, bars aggregate hit count and average velocity in four-pixel bins.
-Collapsed kits show aggregate hit density. Pitched tracks retain note contours
-at every zoom: exact notes when the visible detail fits, and bounded pitch/time
-occupancy for dense ranges. Zooming into an overview restores individual notes.
+At wide zoom and in collapsed groups, bars show **onset density**, not invented
+average velocity. Pitched tracks retain duration occupancy at every zoom: exact
+notes when detail fits and bounded pitch/time occupancy for dense ranges. The
+fixed MIDI 0–127 pitch scale does not shift when another page introduces a note.
+Zooming into an overview restores individual notes.
 Lane meters, hit inspection, analysis selection, and source navigation use the
 physical voice tracks. Group membership comes from the engine's authored metadata,
 so custom names work and unrelated dotted track IDs stay independent.
@@ -191,6 +230,8 @@ playback, loading each next note page before revealing it so notes and viewport
 move in one paint. Manual horizontal scrolling or dragging turns Follow off and
 cancels pending follow moves. With the arrangement focused, Left/Right pan,
 +/− zoom, and Home fits the project.
+The scrollable surface expands before a zoom-in applies its anchor, so native
+scroll clamping cannot silently discard that position.
 
 ## Build and static hosting
 
@@ -225,8 +266,9 @@ Gists support `.muz` and `.md` files, plus optional `muzpad.json` with `title`,
 `paths` maps flat gist filenames to project-relative paths, for example
 `{"paths":{"voice.muz":"parts/voice.muz"},"entry":"song.muz"}`. Files import into
 an editable local workspace; Markdown is rendered with the same HTML sanitization
-as local documents. Without metadata, the entry defaults to `song.muz` or the first
-muz file; the compiler then discovers valid entrypoints.
+as local documents. Without metadata, entry selection prefers root `song.muz`,
+then root `main.muz`, then lexical source path. Evaluation discovers source kind
+without silently changing explicit metadata or promising resource readiness.
 
 To explicitly publish a local piece as a **secret** gist using your authenticated
 GitHub CLI account:
@@ -268,8 +310,9 @@ explicit, and expired captures cannot be reused.
 
 CLAP and VST3 plugins are trusted native code with engine-process privileges,
 not individually sandboxed plugins. A plugin crash/hang can terminate the whole
-child. The child is not an OS filesystem sandbox: grants constrain host
-loaders/resolvers, not arbitrary system calls by trusted plugins. Parent/child
+child. The child is not an OS filesystem sandbox: trusted project read policy
+constrains host loaders/resolvers, not arbitrary system calls by approved plugins.
+Reading a sample or source does not approve a downloaded executable. Parent/child
 separation contains ordinary engine crashes, not malicious native code.
 Native exports pin the accepted revision and its resources, not newer
 working edits or listening mute/solo controls. Missing, changed or unpinnable
@@ -321,9 +364,11 @@ core README/license, std documents and examples, retaining relative paths.
 The standard library remains embedded. Downloaded sample libraries, plugin
 binaries, licensed presets, untracked user files and caches are excluded.
 Plugin configuration (`MUZ_PLUGIN_CONFIG`, or the core's XDG/HOME default) and
-external resources remain user-owned. Installed `MUZ_CONTRIB_DIR` and XDG data
-contrib roots receive explicit read grants for module-relative assets; bundled
-modules provide offline fallback, not missing sample/plugin installations.
+external resources remain user-owned. Trusted native projects demand-read consumed
+account-accessible modules/assets, including canonical external links, without
+per-library prompts or eager scans of unrelated trees. Bundled modules provide
+offline fallback, not missing sample/plugin installations. Approved plugins retain
+separate executable authority.
 
 See [the native host implementation reference](docs/desktop-host.md) for resource
 and safety boundaries. The production x86_64 DEB was independently extracted and
@@ -360,12 +405,17 @@ In the browser host, compiler and rendering workers instantiate the same WASM li
 Compilation returns a revision summary and a checked playable snapshot. Detailed
 graph, arrangement, patch, automation, diagnostic, source-location, provenance,
 and revision-difference data is requested afterward in revision-checked pages of
-at most 1,000 rows and 1 MiB. The arrangement requests only its visible time
-range and discards old ranges from its bounded cache. Patch and automation detail
-is loaded only when its view opens. Accepted revision changes discard the previous
-detail DOM before loading its replacement, keeping transport animation bound to
-the displayed revision's automation data. Stale pages are rejected rather than
-being shown for a newer accepted revision.
+at most 1,000 rows and 1 MiB. Complete lightweight graph/section/group catalogs
+use bounded continuations independently of visible note tiles. The arrangement
+stages coverage, rows, coordinates, labels and hit tests together; uncovered
+targets are pending, and retained old visuals are explicitly previous revision.
+Identity-sensitive actions stay disabled until presentation matches the desired
+target. Its LRU cache is bounded to 128 entries, 24,000 rows and 8 MiB encoded
+pages; structural catalogs have separate 32,768-row/16 MiB bounds. Dispatch stays
+below host capacity (at most four), with at most 64 queued requests. Nearby covered
+navigation reuses tiles; obsolete latest-target replies cannot replace them.
+Patch and automation detail is loaded only when its view opens. Stale pages are
+rejected rather than relabeled for a newer accepted revision.
 Build phase notifications use captured source metadata without decoding assets
 again; asset bytes are decoded at the actual compiler/audio transfer boundary.
 
@@ -431,6 +481,63 @@ pairs), denied preference storage, migration and newest-wins saves.
 Native acceptance is separate and must exercise the actual Linux application,
 native preferences relaunch, save/conflict/close/recovery, engine failure/restart,
 analysis and export. Browser screenshots alone do not establish native acceptance.
+
+The bounded closeout is desktop-focused, not exhaustive qualification of every
+candidate-cancellation, supersession, global-retarget or dependency/alias
+authorization interleaving. Small-screen and narrow-viewport qualification was
+deliberately retired. The native content/remote-ingress matrix and successful
+import of a live Gist containing `.muz` source were not exercised; scripted GitHub
+fixtures do not establish those native paths. Existing timing/calibration results
+retain their original build and fixture scopes; final smoke is not retiming.
+These limits do not relax preview trust,
+executable approval, accepted-resource pinning or stale-identity guards.
+
+Native ZIP-preview qualification observed a persistent **Stale project event.**
+operation diagnostic even though trust denial was enforced and Cancel restored
+the exact accepted workspace/music. Its original notification was not identified in the
+bounded closeout; a later global recovery notification was not established as its
+cause. This remains a known status-diagnostic limit, not a claim of exhaustive
+lifecycle-event ordering coverage.
+
 Set `CHROMIUM_PATH` to use an existing Chromium executable. Engine embedding tests
 live in muz-core and use small independent cases. Still Our Own is a manual
 integration piece, not a frozen regression fixture.
+
+## Changelog
+
+### 2026-10-03 — workbench and core cutover
+
+- Native candidate/control admission uses authoritative callback outcomes;
+  independent build, playback, Save, recovery and operation status preserves
+  typed rejected/partial/unknown outcomes and actionable diagnostics.
+- Related-source lookup is page-independent and latest-intent guarded. Evaluated
+  entry kind is separate from build readiness; explicit missing/non-song/non-source
+  declarations remain visible instead of being rewritten or silently discarded.
+- Deliberate native folder opens use ordinary account reads with confined writes
+  and immutable accepted pins. Imports/untrusted recovery require parent Trust
+  and run; retained global controls/export remain available, while score-bound
+  mutations reject at parent and child admission. Executable approval is separate.
+- Continuous full-window analysis, independent detail/meters, bounded latest-only
+  delivery and visibility-aware drawing replace sparse capture/polling gates.
+  Reported native sample clocks and browser analyser-clock limits remain explicit.
+  Selected-window peak/RMS stay independent of master meters; browser readiness
+  loss explicitly retires the previously displayed detail.
+- Arrangement catalogs, coverage-aligned bounded caching and staged presentation
+  keep labels/notes/hit tests coherent. Shrinking kit layouts clamp the viewport
+  to row extents so sticky bitmaps cannot escape above the visible surface.
+- Source-primary desktop defaults, four themes, single-surface narrow layouts,
+  short-height pane scrolling, grouped commands and accessible live outcomes
+  preserve editing/navigation state and genuine saved preferences.
+- Activated grouped commands dismiss without stealing dialog/pane focus, including
+  a Reload that disables itself while awaiting real folder reads. Accepted revision
+  details remain visible, and automation values/cursors use the exact accepted
+  models presented with their DOM rather than a newer structural catalog.
+- Zoom updates the structural surface before applying its preserved scroll anchor.
+  Indentation folding and retained visible scroll positions preserve real editor
+  and arrangement state across source/library, theme and pane transitions.
+- No speculative inspection indexes or pitch-metadata endpoint were added.
+  Joint corrected-host and lock-matched producer profiling found no material core
+  scan/overview/metadata blocker under unchanged budgets. The independent native
+  producer's selected-page performance-plus-serialization p95 was 0.141 ms and
+  largest selected overview p95 0.512 ms on the isolated 172-track/38,028-note
+  fixture; these are not browser full-pipeline or universal frame-rate guarantees.

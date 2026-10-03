@@ -12,8 +12,8 @@ function capabilities(overrides = {}) {
     pluginConfig: null,
     limits: { frameBytes: 2097152, sourceChunkBytes: 262144, sourceDocumentBytes: 8388608,
       sourceSnapshotBytes: 67108864, outstandingRequests: 64, preparingCandidates: 1, queuedCandidates: 1,
-      inspectionRows: 1000, inspectionBytes: 1048576, statusHz: 20, analysisHz: 10,
-      waveformSamples: 2048, spectrumBins: 1024, trackMeters: 1000, analysisBytes: 131072,
+      inspectionRows: 1000, inspectionBytes: 1048576, statusHz: 20, analysisHz: 30,
+      waveformSamples: 2048, spectrumBins: 1025, trackMeters: 1000, analysisBytes: 131072,
       exportWorkers: 2, exportQueue: 32, playableSnapshotBytes: 268435456, ...overrides },
   };
 }
@@ -21,13 +21,14 @@ const project = {
   project: 'project', epoch: 'project-epoch', title: 'Native test', entry: 'main.muz', entries: ['main.muz'],
   sourceVersion: 1, diskGeneration: '0', settingsDiskVersion: null, files: [], resources: [], conflicts: [],
   dirty: false, rootLabel: 'native-folder',
+  execution: {trusted:true,policy:'account-native'},
 };
 const ref = { project: project.project, epoch: project.epoch, engineEpoch: 'engine-epoch', revision: 'opaque-revision', sourceVersion: 1, entry: 'main.muz' };
 const capture = { project: project.project, epoch: project.epoch, sourceVersion: 1, entry: 'main.muz',
   expectedDiskGeneration: '0', buffers: [], settings: { title: project.title, entry: project.entry }, settingsDiskVersion: null };
 const sourceSnapshot = { id: 'source-snapshot', project: project.project, epoch: project.epoch, sourceVersion: 1, entry: 'main.muz', diskGeneration: '0', files: [] };
-function transport(generation = '1', revision = ref) {
-  return { ref: revision, generation, playing: true, finished: false, beat: 0, seconds: 0, bpm: 120,
+function transport(generation = '1', revision = ref, sequence = generation) {
+  return { ref: revision, generation, sequence, playing: true, finished: false, beat: 0, seconds: 0, bpm: 120,
     meter: [4, 4], duration: 2, endBeat: 4, tail: 0, loop: null, peak: 0, rms: 0, meters: [], audio, health: {} };
 }
 function accepted(revision = ref) {
@@ -59,7 +60,8 @@ function fake(options = {}) {
       assert.ok(listener, 'event listener registered before native activity');
       listener({ protocolVersion: 1, requestId: 'host-event', project: { project: project.project, epoch: project.epoch },
         engineEpoch: ref.engineEpoch, sourceVersion: 1, revision: value.status?.ref.revision ?? value.frame?.ref.revision ?? value.ref?.revision ?? null,
-        sequence: String(++sequence), event: { scope, value }, ...identity });
+        sequence: String(++sequence), barrier: value.kind === 'engine' || (value.kind === 'build' && value.phase === 'accepted') || value.kind === 'changed',
+        event: { scope, value }, ...identity });
     },
     transfer(value, size = 128) {
       const data = Buffer.from(JSON.stringify(value));
@@ -281,7 +283,9 @@ test('desktop source metadata stays bounded without retaining file arrays or los
     await assert.rejects(host.runtime.checkEntries({ snapshot: firstId, entries: [] }, op('expired-scan')), error => error.code === 'stale_request');
     await assert.rejects(host.runtime.rebuild({ snapshot: firstId, base: null }, op('expired-build')), error => error.code === 'stale_request');
     assert.equal(f.calls.length, callsBeforeExpired, 'expired handles are rejected before dispatch');
-    scanResult.resolve({ snapshot: firstId, sourceVersion: 1, entries: [] });
+    scanResult.resolve({ snapshot: firstId, sourceVersion: 1, entries: [
+      {entry:'main.muz',kind:'song',readiness:{kind:'unchecked'},failure:null},
+    ] });
     assert.equal((await scanning).sourceVersion, 1);
     buildResult.resolve(accepted({ ...ref, revision: 'active-revision', sourceVersion: 1 }));
     assert.equal((await building).ref.sourceVersion, 1);
@@ -388,7 +392,7 @@ test('stale transport and analysis generations never replace acknowledged state'
   f.event('runtime', { kind: 'status', status: transport('2') });
   await flush();
   assert.deepEqual(received.filter(event => event.kind === 'status').map(event => event.status.generation), ['2']);
-  await assert.rejects(host.runtime.transport(ref, { kind: 'pause' }, op('stale')), error => error.code === 'stale_transport');
+  assert.equal((await host.runtime.transport(ref, { kind: 'pause' }, op('stale'))).generation,'1');
   await host.dispose();
 });
 
@@ -567,4 +571,201 @@ test('native source resolution enforces the authorized document byte budget', as
     await assert.rejects(host.projects.resolveSourceDocument({ project: { project: project.project, epoch: project.epoch },
       path: '/granted/external.muz' }, op('oversized-source')), error => error.code === 'too_large');
   } finally { await host.dispose(); }
+});
+
+test('native classification validates source kind separately from readiness and preserves candidate order', async () => {
+  const results = [
+    {entry:'missing.muz',kind:'unresolved',readiness:{kind:'unchecked'},failure:{code:'missing_module',message:'Missing import',phase:'compile',continuity:'not-started'}},
+    {entry:'orchestra.muz',kind:'non-song',description:'null',readiness:{kind:'unchecked'},failure:null},
+    {entry:'song.MUZ',kind:'song',readiness:{kind:'unchecked'},failure:null},
+  ];
+  const f = fake({handlers:{'runtime.checkEntries':request=>({
+    snapshot:request.payload.value.snapshot,sourceVersion:request.sourceVersion,entries:results,
+  })}});
+  const host = await createDesktopHostWithBridge(f.bridge);
+  try {
+    const captured = await host.projects.snapshotSources(capture,op('classify-capture'));
+    assert.deepEqual((await host.runtime.checkEntries({snapshot:captured.id,entries:results.map(item=>item.entry)},op('classify'))).entries,results);
+    results[2] = {...results[2],kind:'playable'};
+    await assert.rejects(host.runtime.checkEntries({snapshot:captured.id,entries:results.map(item=>item.entry)},op('bad-kind')), {code:'protocol_mismatch'});
+  } finally {await host.dispose();}
+});
+
+test('telemetry bypasses non-lifecycle hydration while reliable failures keep global ingress order', async () => {
+  const f = fake(), gate = deferred(), entered = deferred();
+  const invoke = f.bridge.invoke.bind(f.bridge);
+  f.bridge.invoke = async (command,args) => {
+    if (args.request?.method === 'transfer.read') {entered.resolve();await gate.promise;}
+    return invoke(command,args);
+  };
+  const host = await createDesktopHostWithBridge(f.bridge), events = [];
+  host.runtime.subscribe(event=>events.push(event));
+  const issue = {kind:'failure',failure:{code:'render_fault',phase:'transport',message:'Reliable problem',continuity:'preserved'}};
+  try {
+    f.event('runtime',f.transfer(issue));
+    await entered.promise;
+    for(let generation=1;generation<=100;generation++) f.event('runtime',{kind:'status',status:transport(String(generation))});
+    await flush();
+    assert.equal(events.filter(event=>event.kind==='status').at(-1).status.generation,'100');
+    assert.equal(events.filter(event=>event.kind==='failure').length,0);
+    gate.resolve();await flush();await flush();
+    assert.deepEqual(events.filter(event=>event.kind==='failure'),[issue]);
+  } finally {gate.resolve();await host.dispose();}
+});
+
+test('a pending accepted lifecycle barrier holds newer telemetry until reliable acceptance publishes', async () => {
+  const f = fake(), gate = deferred(), entered = deferred(), next = {...ref,revision:'new-revision'};
+  const invoke = f.bridge.invoke.bind(f.bridge);
+  f.bridge.invoke = async(command,args)=>{
+    if(args.request?.method==='transfer.read'){entered.resolve();await gate.promise;}
+    return invoke(command,args);
+  };
+  const host = await createDesktopHostWithBridge(f.bridge), events=[];
+  host.runtime.subscribe(event=>events.push(event));
+  try {
+    const build={kind:'build',requestId:'apply',project:{project:project.project,epoch:project.epoch},
+      sourceVersion:1,phase:'accepted',ref:next,failure:null};
+    f.event('runtime',f.transfer(build),{requestId:'apply',barrier:true});
+    await entered.promise;
+    f.event('runtime',{kind:'status',status:transport('2',next)});
+    await flush();assert.equal(events.filter(event=>event.kind==='status').length,0);
+    gate.resolve();await flush();await flush();
+    assert.deepEqual(events.filter(event=>event.kind==='build'||event.kind==='status').map(event=>event.kind),['build','status']);
+  } finally {gate.resolve();await host.dispose();}
+});
+
+test('native imported previews trust only through the parent command and negotiate independent analysis', async () => {
+  const f=fake({bootstrapProject:()=>({...project,execution:{trusted:false,policy:'preview'}}),
+    handlers:{'project.trustAndRun':()=>project}});
+  const host=await createDesktopHostWithBridge(f.bridge);
+  try {
+    assert.equal((await host.projects.trustAndRun({project:{project:project.project,epoch:project.epoch}},op('trust'))).execution.trusted,true);
+    const subscription={source:null,detail:false,meters:true,detailHz:30,meterHz:20};
+    await host.runtime.analysis(ref,subscription);
+    assert.deepEqual(f.calls.find(call=>call.args.request?.method==='runtime.analysis').args.request.payload.value,{ref,subscription});
+    await assert.rejects(host.runtime.analysis(ref,{...subscription,detailHz:31}),{code:'resource_budget'});
+  } finally {await host.dispose();}
+});
+
+test('global transport receipts may describe the new accepted ref while score-bound commands cannot retarget',async()=>{
+  const next={...ref,revision:'new-accepted',sourceVersion:2,entry:'alternate.muz'};
+  const f=fake({handlers:{'runtime.transport':()=>transport('3',next)}});
+  const host=await createDesktopHostWithBridge(f.bridge);
+  try{
+    assert.deepEqual((await host.runtime.transport(ref,{kind:'pause'},op('deferred-pause'))).ref,next);
+    await assert.rejects(host.runtime.transport(ref,{kind:'seek',beat:1},op('pinned-seek')),{code:'protocol_mismatch'});
+    f.handlers['runtime.transport']=()=>({__reply:context=>({...context,ok:false,failure:{
+      code:'stale_revision',phase:'transport',continuity:'preserved',message:'Callback stale',
+      runtime:{code:'StaleRevision',expectedRevision:'9007199254740993',observedRevision:'9007199254740995'},
+    }})});
+    await assert.rejects(host.runtime.transport(ref,{kind:'pause'},op('runtime-ticket')),error=>{
+      assert.equal(error.operation.expectedRuntimeRevision,'9007199254740993');
+      assert.equal(error.operation.actualRuntimeRevision,'9007199254740995');return true;
+    });
+  }finally{await host.dispose();}
+});
+
+test('native imported preview retains only prior exact accepted authority and trust cancellation restores it',async()=>{
+  const preview={...project,project:'preview-project',epoch:'preview-epoch',execution:{trusted:false,policy:'preview'}};
+  const f=fake({handlers:{'project.importProject':()=>preview,'project.trustAndRun':()=>project}});
+  const host=await createDesktopHostWithBridge(f.bridge),events=[];
+  host.runtime.subscribe(event=>events.push(event));
+  const input={kind:'content',project:{settings:{title:'Preview',entry:'main.muz'},files:[{path:'main.muz',text:'null'}],assets:[]}};
+  try{
+    const captured=await host.projects.snapshotSources(capture,op('retain-source'));
+    await host.runtime.rebuild({snapshot:captured.id,base:null},op('retain-accepted'));
+    await host.projects.importProject(input,op('preview-import'));
+    assert.deepEqual((await host.runtime.inspect(ref,'summary',{},op('preview-inspect'))).ref,ref);
+    assert.deepEqual((await host.runtime.export(ref,{kind:'masterWav'},op('preview-export'))).ref,ref);
+    await assert.rejects(host.runtime.transport({...ref,entry:'different.muz'},{kind:'pause'},op('wrong-retained-ref')),{code:'stale_revision'});
+    f.event('runtime',{kind:'status',status:transport('3')});
+    await flush();
+    assert.equal(events.filter(event=>event.kind==='status').at(-1).status.generation,'3');
+    const restored=await host.projects.trustAndRun({project:{project:preview.project,epoch:preview.epoch}},op('trust-cancel'));
+    assert.equal(restored.project,project.project);
+    assert.deepEqual((await host.runtime.transport(ref,{kind:'pause'},op('restored-pause'))).ref,ref);
+    await host.projects.importProject(input,op('second-preview'));
+    f.handlers['project.trustAndRun']=()=>({...preview,execution:{trusted:true,policy:'account-native'}});
+    await host.projects.trustAndRun({project:{project:preview.project,epoch:preview.epoch}},op('trust-approved'));
+    await assert.rejects(host.runtime.export(ref,{kind:'masterWav'},op('retired-export')),{code:'stale_request'});
+  }finally{await host.dispose();}
+});
+
+test('retained preview engine-scoped failure envelopes preserve actual reliable cause exactly once',async()=>{
+  const preview={...project,project:'preview-project',epoch:'preview-epoch',execution:{trusted:false,policy:'preview'}};
+  const f=fake({handlers:{'project.importProject':()=>preview}});
+  const host=await createDesktopHostWithBridge(f.bridge),received=[];
+  host.runtime.subscribe(event=>received.push(event));
+  try{
+    const captured=await host.projects.snapshotSources(capture,op('backup-source'));
+    await host.runtime.rebuild({snapshot:captured.id,base:null},op('backup-build'));
+    await host.projects.importProject({kind:'content',project:{settings:{title:'Preview',entry:'main.muz'},
+      files:[{path:'main.muz',text:'null'}],assets:[]}},op('backup-import'));
+    const issue={kind:'failure',failure:{code:'plugin_restart_failed',message:'Plugin service failed',
+      phase:'engine',continuity:'preserved',requestId:'plugin-service'}};
+    f.event('runtime',issue,{requestId:'plugin-service',revision:null,sourceVersion:null});
+    await flush();
+    const failures=received.filter(event=>event.kind==='failure');
+    assert.deepEqual(failures,[issue]);
+    assert.equal(failures.some(event=>event.failure.code==='stale_request'),false);
+    const engineFailure={kind:'engine',state:'failed',engineEpoch:ref.engineEpoch,capabilities:f.cap,failure:issue.failure};
+    f.event('runtime',engineFailure,{revision:null,sourceVersion:null});
+    await flush();
+    assert.deepEqual(received.filter(event=>event.kind==='engine').at(-1),engineFailure);
+  }finally{await host.dispose();}
+});
+
+test('desktop rejects1001 candidates before dispatch and preserves supplied classification failure identity',async()=>{
+  const f=fake(),host=await createDesktopHostWithBridge(f.bridge);
+  try{
+    const captured=await host.projects.snapshotSources(capture,op('budget-capture'));
+    const entries=Array.from({length:1001},(_,index)=>`candidate-${index}.MUZ`);
+    await assert.rejects(host.runtime.checkEntries({snapshot:captured.id,entries},op('too-many')),error=>{
+      assert.equal(error.code,'resource_budget');assert.equal(error.operation.action,'classifyEntries');
+      assert.equal(error.operation.requestId,'too-many');return true;
+    });
+    assert.equal(f.calls.some(call=>call.args.request?.method==='runtime.checkEntries'),false);
+    const cause={code:'resource_budget',phase:'compile',continuity:'not-started',message:'Whole scan resource limit',
+      requestId:'native-source-budget',operation:{action:'classifyEntries',requestId:'native-source-budget',ref:null,
+        outcome:'rejected',phase:'compile',continuity:'not-started',expectedRuntimeRevision:null,actualRuntimeRevision:null}};
+    f.handlers['runtime.checkEntries']=()=>({__reply:context=>({...context,ok:false,failure:cause})});
+    await assert.rejects(host.runtime.checkEntries({snapshot:captured.id,entries:['main.MUZ']},op('native-source-budget')),error=>{
+      assert.deepEqual(error,cause);return true;
+    });
+  }finally{await host.dispose();}
+});
+
+test('same-generation paused receipt remains applied without rewinding newer produced telemetry or delayed accepted body',async()=>{
+  const buildGate=deferred(),buildEntered=deferred(),controlGate=deferred(),controlEntered=deferred();
+  const f=fake({handlers:{
+    'runtime.rebuild':()=>{buildEntered.resolve();return buildGate.promise;},
+    'runtime.transport':()=>{controlEntered.resolve();return controlGate.promise;},
+  }});
+  const host=await createDesktopHostWithBridge(f.bridge);
+  try{
+    const captured=await host.projects.snapshotSources(capture,op('status-source'));
+    const building=host.runtime.rebuild({snapshot:captured.id,base:null},op('status-build'));
+    await buildEntered.promise;
+    f.event('runtime',{kind:'build',requestId:'status-build',project:{project:project.project,epoch:project.epoch},
+      sourceVersion:1,phase:'accepted',ref,failure:null},{requestId:'status-build'});
+    await flush();
+    const paused=transport('1',ref,'9007199254740995');paused.playing=false;paused.meters=[{track:'lead',peak:0.4,rms:0.2}];
+    f.event('runtime',{kind:'status',status:paused});await flush();
+    const initial=accepted();initial.status={...transport('1',ref,'9007199254740993'),playing:false};
+    buildGate.resolve(initial);await building;
+    const afterBuild=[];const unsubscribe=host.runtime.subscribe(event=>{if(event.kind==='status')afterBuild.push(event.status);});
+    assert.deepEqual(afterBuild,[paused],"older accepted body cannot rewind equal-generation paused telemetry");
+    const stopping=host.runtime.transport(ref,{kind:'pause'},op('older-applied-pause'));
+    await controlEntered.promise;
+    const newer={...paused,sequence:'9007199254740997',meters:[{track:'lead',peak:0.8,rms:0.3}]};
+    f.event('runtime',{kind:'status',status:newer});await flush();
+    const applied={...paused,sequence:'9007199254740996'};
+    controlGate.resolve(applied);assert.deepEqual(await stopping,applied,"older successful action still acknowledges authoritative applied receipt");
+    const latest=[];host.runtime.subscribe(event=>{if(event.kind==='status')latest.push(event.status);});
+    assert.deepEqual(latest,[newer],"older applied receipt cannot overwrite newer same-generation measurement");
+    unsubscribe();
+  }finally{
+    buildGate.resolve(accepted());controlGate.resolve(transport());
+    await host.dispose();
+  }
 });

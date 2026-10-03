@@ -262,7 +262,7 @@ mod tests{
             owner.request_timeout(&context,command,args,Some(Duration::from_secs(10))).unwrap()
         };
         request("hello",json!({"coreRevision":env!("MUZPAD_CORE_REVISION"),"limits":protocol::limits()}));
-        request("configureProject",json!({"project":reference,"readGrants":service.read_grants()}));
+        request("configureProject",json!({"project":reference,"readBindings":service.read_bindings(),"trustedRead":service.trusted_read()}));
         let descriptors:Vec<_>=files.iter().map(|(file,text)|{
             let mut file=file.clone();file["bytes"]=json!(text.len());file
         }).collect();
@@ -275,8 +275,9 @@ mod tests{
         request("snapshotFinish",json!({"snapshot":snapshot["id"]}));
         let checked=request("checkEntries",json!({"snapshot":snapshot["id"],"entries":["song.muz"]}));
         assert_eq!(checked["sourceVersion"],project["sourceVersion"]);
-        assert_eq!(checked["entries"][0]["playable"],false);
-        assert_eq!(checked["entries"][0]["failure"]["code"],"invalid_source");
+        assert_eq!(checked["entries"][0]["kind"],"non-song");
+        assert_eq!(checked["entries"][0]["readiness"]["kind"],"unchecked");
+        assert!(checked["entries"][0]["failure"].is_null());
         owner.shutdown();assert!(owner.child.lock().is_none());
         service.shutdown().unwrap();
     }

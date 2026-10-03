@@ -1,6 +1,6 @@
 import type {
   AcceptedRevision, AnalysisFrame, ArchiveResult, CloseReason, CloseResult, DiffPage, EntryCheckResult, ExplanationPage,
-  ExportResult, Failure, HostCapabilities, HostEvent, HostLimits,
+  ExportResult, Failure, HostCapabilities, HostEvent, HostLimits, EntryClassification, AttemptedAction,
   InspectionPage, Operation, PageRequest, ProjectEvent, ProjectRef,
   ProjectSnapshot, ProjectStore, RecentProject, RecoveryOffer, ResolvedSourceDocument, RevisionRef, RuntimeEvent, SaveResult,
   SourceLocation, SourceSnapshot, TransportStatus, WorkbenchHost, WorkbenchRuntime,
@@ -16,7 +16,7 @@ type Context = {
   protocolVersion: 1; requestId: string; project: ProjectRef | null;
   engineEpoch: string | null; sourceVersion: number | null; revision: string | null;
 };
-type Envelope = Context & { sequence: string; event: { scope: 'runtime' | 'project' | 'host'; value: unknown } };
+type Envelope = Context & { sequence: string; barrier: boolean; event: { scope: 'runtime' | 'project' | 'host'; value: unknown } };
 type Transfer = { transfer: { id: string; bytes: number; chunks: number } };
 type SnapshotContext = Pick<SourceSnapshot, 'id' | 'project' | 'epoch' | 'sourceVersion'>;
 type Bootstrap = { protocolVersion: 1; engineEpoch: string; capabilities: HostCapabilities; project: ProjectSnapshot | Transfer | null; recovery: RecoveryOffer[] };
@@ -83,6 +83,15 @@ function context(value: unknown): asserts value is Context {
   if (value.sourceVersion !== null) integer(value.sourceVersion);
   if (value.revision !== null) id(value.revision);
 }
+function validateEnvelope(value: unknown): asserts value is Envelope {
+  object(value);
+  const {sequence,barrier,event} = value;
+  context(value); u64(sequence);
+  ensure(typeof barrier === 'boolean', 'Missing ordered lifecycle barrier.');
+  object(event);
+  ensure(['runtime','project','host'].includes(event.scope) && 'value' in event,
+    'Invalid desktop event envelope.');
+}
 function sameContext(a: Context, b: Context): boolean {
   return a.protocolVersion === b.protocolVersion && a.requestId === b.requestId &&
     sameProject(a.project, b.project) && a.engineEpoch === b.engineEpoch &&
@@ -121,6 +130,23 @@ function validateFailure(value: unknown): asserts value is Failure {
   object(value); id(value.code); ensure(typeof value.message === 'string', 'Invalid failure message.');
   ensure(['project', 'compile', 'prepare', 'apply', 'transport', 'inspect', 'export', 'engine'].includes(value.phase), 'Invalid failure phase.');
   ensure(['preserved', 'lost', 'not-started'].includes(value.continuity), 'Invalid failure continuity.');
+  if (value.runtime !== undefined) {
+    object(value.runtime); id(value.runtime.code);
+    if (value.runtime.expectedRevision !== null) u64(value.runtime.expectedRevision);
+    if (value.runtime.observedRevision !== null) u64(value.runtime.observedRevision);
+  }
+  if (value.operation !== undefined) {
+    object(value.operation); const operation = value.operation;
+    id(operation.action); id(operation.requestId);
+    ensure(['rebuild','classifyEntries','format','play','pause','stop','restart','panic','seek','loop',
+      'audition','analysis','inspect','export','save','refresh','openProject','importProject',
+      'trustAndRun','recovery','restartEngine','project'].includes(operation.action), 'Invalid attempted action.');
+    if (operation.ref !== null) revisionRef(operation.ref);
+    ensure(['applied','rejected','cancelled','superseded','unknown','partial'].includes(operation.outcome), 'Invalid operation outcome.');
+    ensure(['preserved','lost','not-started'].includes(operation.continuity), 'Invalid operation continuity.');
+    ensure(['project','compile','prepare','apply','transport','inspect','export','engine'].includes(operation.phase), 'Invalid operation phase.');
+    for (const runtime of [operation.expectedRuntimeRevision, operation.actualRuntimeRevision]) if (runtime !== null) u64(runtime);
+  }
 }
 function capabilities(value: unknown): asserts value is HostCapabilities {
   object(value); ensure(value.environment === 'desktop' && value.protocolVersion === 1, 'Not a desktop protocol-v1 host.');
@@ -136,7 +162,7 @@ function capabilities(value: unknown): asserts value is HostCapabilities {
   const ceilings: Partial<HostLimits> = {
     sourceDocumentBytes: 8 * 1024 * 1024, sourceSnapshotBytes: 64 * 1024 * 1024,
     outstandingRequests: 64, inspectionRows: 1000, inspectionBytes: 1024 * 1024,
-    waveformSamples: 2048, spectrumBins: 1024, trackMeters: 1000,
+    waveformSamples: 2048, spectrumBins: 1025, trackMeters: 1000, statusHz: 20, analysisHz: 30,
     analysisBytes: 128 * 1024, playableSnapshotBytes: 256 * 1024 * 1024,
   };
   for (const [name, ceiling] of Object.entries(ceilings)) {
@@ -171,6 +197,10 @@ function snapshot(value: unknown, limits: HostLimits): asserts value is ProjectS
   integer(item.sourceVersion); u64(item.diskGeneration); id(item.entry);
   ensure(typeof item.title === 'string' && Array.isArray(item.entries) && Array.isArray(item.files) &&
     Array.isArray(item.resources) && Array.isArray(item.conflicts) && typeof item.dirty === 'boolean', 'Invalid project snapshot.');
+  object(item.execution);
+  ensure(typeof item.execution.trusted === 'boolean' &&
+    ['account-native','preview'].includes(item.execution.policy) &&
+    item.execution.trusted === (item.execution.policy === 'account-native'), 'Invalid native execution authority.');
   if (item.gist !== undefined) ensure(typeof item.gist === 'string' &&
     /^[a-f0-9]{32,40}(?:\/[a-f0-9]{40})?$/.test(item.gist), 'Invalid project gist origin.');
   for (const file of item.files) {
@@ -242,7 +272,12 @@ function validateInput(method: string, value: unknown): void {
     }
   }
   if (method === 'runtime.rebuild' || method === 'runtime.checkEntries') id(value.snapshot);
-  if (method === 'runtime.checkEntries') { ensure(Array.isArray(value.entries), 'Invalid entry list.'); for (const entry of value.entries) id(entry); }
+  if (method === 'runtime.checkEntries') {
+    ensure(Array.isArray(value.entries), 'Invalid entry candidate list.');
+    ensure(value.entries.length <= 1000, 'Entry candidates exceed the supported source scan budget.', 'resource_budget');
+    ensure(new Set(value.entries).size === value.entries.length, 'Duplicate entry candidates.', 'invalid_source');
+    for (const entry of value.entries) { id(entry); ensure(/\.muz$/i.test(entry), 'Entry must be a source path.'); }
+  }
   if (method === 'runtime.inspect') ensure(['summary', 'graph', 'patches', 'patch_nodes', 'patch_detail',
     'performance', 'performance_overview', 'automation', 'automation_points', 'sections', 'track_groups',
     'locations', 'score', 'diagnostics'].includes(value.view), 'Unknown inspection view.');
@@ -260,7 +295,14 @@ function validateInput(method: string, value: unknown): void {
       ensure(new Set(tracks).size === tracks.length, 'Duplicate audition track.');
     }
   }
-  if (method === 'runtime.analysis') ensure((value.source === null || typeof value.source === 'string') && typeof value.enabled === 'boolean', 'Invalid analysis subscription.');
+  if (method === 'runtime.analysis') {
+    object(value.subscription); const subscription = value.subscription;
+    ensure((subscription.source === null || typeof subscription.source === 'string') &&
+      typeof subscription.detail === 'boolean' && typeof subscription.meters === 'boolean', 'Invalid analysis subscription.');
+    integer(subscription.detailHz); integer(subscription.meterHz);
+    ensure(subscription.detailHz > 0 && subscription.detailHz <= 30 &&
+      subscription.meterHz > 0 && subscription.meterHz <= 20, 'Invalid analysis cadence.');
+  }
   if (method === 'preferences.save') {
     object(value.value); const prefs = value.value;
     ensure(prefs.version === 1 && ['light', 'dark', 'soft-light', 'soft-dark'].includes(prefs.theme), 'Invalid preferences version or theme.');
@@ -280,7 +322,7 @@ function meters(value: unknown, limits: HostLimits): void {
   for (const meter of value) { object(meter); id(meter.track); finite(meter.peak); finite(meter.rms); }
 }
 function status(value: unknown, limits: HostLimits): asserts value is TransportStatus {
-  object(value); revisionRef(value.ref); u64(value.generation);
+  object(value); revisionRef(value.ref); u64(value.generation); u64(value.sequence);
   ensure(typeof value.playing === 'boolean' && typeof value.finished === 'boolean', 'Invalid transport state.');
   for (const key of ['beat', 'seconds', 'bpm', 'duration', 'endBeat', 'tail', 'peak', 'rms']) finite(value[key]);
   ensure(Array.isArray(value.meter) && value.meter.length === 2, 'Invalid meter.');
@@ -291,6 +333,13 @@ function status(value: unknown, limits: HostLimits): asserts value is TransportS
 function analysis(value: unknown, limits: HostLimits): asserts value is AnalysisFrame {
   object(value); revisionRef(value.ref); u64(value.generation); u64(value.sequence); u64(value.dropped);
   for (const key of ['sampleRate', 'captureSeconds', 'peak', 'rms']) finite(value[key]);
+  u64(value.captureId);
+  if (value.windowEndSample !== null) u64(value.windowEndSample);
+  if (value.meterWindowEndSample !== null) u64(value.meterWindowEndSample);
+  integer(value.sampleCount);
+  ensure(value.sampleCount <= 2048 && typeof value.warmup === 'boolean' &&
+    typeof value.metersPresent === 'boolean' && ['hann','blackman'].includes(value.window), 'Invalid analysis window metadata.');
+  finite(value.smoothing); ensure(value.smoothing >= 0 && value.smoothing <= 1, 'Invalid analyser smoothing.');
   for (const [key, max] of [['waveform', limits.waveformSamples], ['spectrum', limits.spectrumBins]] as const) {
     ensure(Array.isArray(value[key]) && value[key].length <= max, 'Analysis sample limit exceeded.', 'too_large');
     for (const number of value[key]) finite(number);
@@ -308,6 +357,16 @@ function accepted(value: unknown, limits: HostLimits): asserts value is Accepted
   }
   json(value.effect); ensure(Array.isArray(value.exportTracks), 'Invalid export tracks.');
   for (const track of value.exportTracks) { object(track); id(track.id); ensure(typeof track.name === 'string' && typeof track.midi === 'boolean', 'Invalid export track.'); }
+}
+function entryClassification(value: unknown): asserts value is EntryClassification {
+  object(value); id(value.entry);
+  ensure(['song','non-song','unresolved'].includes(value.kind), 'Invalid evaluated root kind.');
+  if (value.description !== undefined) ensure(typeof value.description === 'string', 'Invalid root description.');
+  object(value.readiness);
+  ensure(['unchecked','validated','blocked'].includes(value.readiness.kind), 'Invalid readiness state.');
+  if (value.readiness.kind === 'blocked') validateFailure(value.readiness.failure);
+  if (value.failure !== null) validateFailure(value.failure);
+  ensure(value.kind !== 'unresolved' || value.failure !== null, 'Unresolved root lacks its diagnostic.');
 }
 
 export async function createDesktopHost(): Promise<WorkbenchHost> {
@@ -337,6 +396,7 @@ export async function createDesktopHostWithBridge(bridge: DesktopBridge): Promis
   let currentSourceVersion: number | null = null;
   let currentRevision: RevisionRef | null = null;
   let transportGeneration: bigint | null = null;
+  let statusSequence: bigint|null = null;
   let analysisSequence: bigint | null = null;
   let closePermission: { token: string; project: ProjectRef; reason: CloseReason } | null = null;
   let disposed = false;
@@ -344,6 +404,7 @@ export async function createDesktopHostWithBridge(bridge: DesktopBridge): Promis
   let disposePromise: Promise<void> | undefined;
   let runtimeDisposePromise: Promise<void> | undefined;
   let engineReady = true;
+  let entryScanGeneration = 0;
   let preferencesQueue: Promise<void> = Promise.resolve();
   let bootstrapping = true;
   let counter = 0;
@@ -370,7 +431,10 @@ export async function createDesktopHostWithBridge(bridge: DesktopBridge): Promis
   const bootstrapEvents: unknown[] = [];
   let bootstrapBytes = 0;
   let bootstrapError: unknown;
-  const eventQueue: { raw: unknown; size: number; telemetry: string | null }[] = [];
+  const eventQueue: { raw: Envelope; size: number }[] = [];
+  const latestTelemetry: Partial<Record<'status'|'analysis', Envelope>> = {};
+  let lifecycleBarriers = 0;
+  let telemetryScheduled = false;
   let queuedEventBytes = 0;
   let drainingEvents = false;
   let eventBoundaryFailure: Failure | null = null;
@@ -391,7 +455,12 @@ export async function createDesktopHostWithBridge(bridge: DesktopBridge): Promis
   };
   const live = (ctx: Context, engine = true) => {
     ensure(!disposed, 'Desktop host has been disposed.', 'stale_request');
-    ensure(sameProject(ctx.project, currentProject), 'Project changed while the request was in flight.', 'stale_request');
+    const retainedPreview = engine && lastProject?.kind === 'changed' &&
+      lastProject.snapshot.execution.policy === 'preview' && currentRevision !== null &&
+      sameProject(ctx.project, currentRevision) && ctx.engineEpoch === currentRevision.engineEpoch &&
+      ctx.revision === currentRevision.revision && ctx.sourceVersion === currentRevision.sourceVersion;
+    ensure(sameProject(ctx.project, currentProject) || retainedPreview,
+      'Project changed while the request was in flight.', 'stale_request');
     if (engine && ctx.engineEpoch !== null) ensure(ctx.engineEpoch === engineEpoch, 'Engine changed while the request was in flight.', 'stale_request');
   };
   function makeContext(op: Operation, ref?: RevisionRef | ProjectRef | null, sourceVersion?: number | null): Context {
@@ -399,6 +468,11 @@ export async function createDesktopHostWithBridge(bridge: DesktopBridge): Promis
     if (ref) projectRef(ref);
     const revision = ref && 'revision' in ref ? ref as RevisionRef : null;
     if (revision) revisionRef(revision);
+    if (revision && !sameProject(revision,currentProject) && lastProject?.kind === 'changed' &&
+        lastProject.snapshot.execution.policy === 'preview') {
+      ensure(currentRevision !== null && sameRef(revision,currentRevision),
+        'Preview operations require the exact retained accepted revision.', 'stale_revision');
+    }
     return { protocolVersion: 1, requestId: op.requestId, project: ref ? { project: ref.project, epoch: ref.epoch } : currentProject,
       engineEpoch: revision?.engineEpoch ?? engineEpoch, sourceVersion: sourceVersion ?? revision?.sourceVersion ?? currentSourceVersion,
       revision: revision?.revision ?? null };
@@ -465,10 +539,15 @@ export async function createDesktopHostWithBridge(bridge: DesktopBridge): Promis
     snapshot(value, caps.limits);
     ensure(!sameProject(currentProject, value) || currentSourceVersion === null || value.sourceVersion >= currentSourceVersion,
       'Project response predates a newer local working capture.', 'stale_request');
-    if (!sameProject(currentProject, value)) {
+    if (!sameProject(currentProject,value) || (value.execution.trusted && currentRevision !== null &&
+        !sameProject(currentRevision,value))) {
       closePermission = null;
-      clearSnapshots(); currentRevision = null; transportGeneration = null; analysisSequence = null;
-      lastStatus = null; lastAnalysis = null;
+      const preservesAccepted = value.execution.policy === 'preview' ||
+        (currentRevision !== null && sameProject(currentRevision,value));
+      if (!preservesAccepted) {
+        clearSnapshots(); currentRevision = null; transportGeneration = null; statusSequence = null; analysisSequence = null;
+        lastStatus = null; lastAnalysis = null;
+      }
     }
     currentProject = { project: value.project, epoch: value.epoch };
     currentSourceVersion = value.sourceVersion;
@@ -477,8 +556,13 @@ export async function createDesktopHostWithBridge(bridge: DesktopBridge): Promis
   function accept(value: AcceptedRevision) {
     accepted(value, caps.limits);
     ensure(value.ref.engineEpoch === engineEpoch && sameProject(value.ref, currentProject), 'Accepted revision has stale identities.', 'stale_revision');
-    currentRevision = value.ref; transportGeneration = u64(value.status.generation); analysisSequence = null;
-    lastStatus = { kind: 'status', status: value.status }; lastAnalysis = null;
+    const generation = u64(value.status.generation), next = u64(value.status.sequence);
+    if (currentRevision !== null && sameRef(currentRevision,value.ref) && transportGeneration !== null &&
+        (generation < transportGeneration || (generation === transportGeneration && statusSequence !== null && next <= statusSequence))) return;
+    const resetDetail = currentRevision === null || !sameRef(currentRevision,value.ref) || generation !== transportGeneration;
+    currentRevision = value.ref; transportGeneration = generation; statusSequence = next;
+    lastStatus = { kind: 'status', status: value.status };
+    if (resetDetail) { analysisSequence = null; lastAnalysis = null; }
   }
   function checkPage(input: PageRequest) {
     if (input.offset !== undefined) integer(input.offset);
@@ -488,6 +572,7 @@ export async function createDesktopHostWithBridge(bridge: DesktopBridge): Promis
     if (input.start_tick !== undefined && input.end_tick !== undefined) ensure(u64(input.start_tick) <= u64(input.end_tick), 'Invalid inspection tick range.');
   }
   async function request<T>(method: string, payload: unknown, op = nextOp(), ref?: RevisionRef | ProjectRef | null, sourceVersion?: number | null): Promise<T> {
+    try {
     ensure(!disposed && (!runtimeDisposed || !method.startsWith('runtime.')), 'Desktop runtime has been disposed.', 'stale_request');
     const ctx = makeContext(op, ref, sourceVersion);
     const engineBound = method.startsWith('runtime.');
@@ -561,6 +646,25 @@ export async function createDesktopHostWithBridge(bridge: DesktopBridge): Promis
       }
       pending.delete(op.requestId); activeRequestBytes -= encoded.length;
     }
+    } catch (error) {
+      const item = error && typeof error === 'object' && 'code' in error ? error as Failure : failure('protocol_mismatch', String(error));
+      if (!item.operation && currentRevision === null) item.continuity = 'not-started';
+      const action: AttemptedAction = method === 'runtime.transport' && payload && typeof payload === 'object' &&
+        'command' in payload && payload.command && typeof payload.command === 'object' && 'kind' in payload.command ?
+        payload.command.kind as AttemptedAction :
+        method === 'runtime.checkEntries' ? 'classifyEntries' : method === 'host.restartEngine' ? 'restartEngine' :
+        method === 'runtime.format' ? 'format' : method.startsWith('runtime.') ?
+          ({rebuild:'rebuild',audition:'audition',analysis:'analysis',export:'export'} as Record<string,AttemptedAction>)[method.slice(8)] ?? 'inspect' :
+        ({'project.save':'save','project.refresh':'refresh','project.importProject':'importProject',
+          'project.trustAndRun':'trustAndRun','project.chooseFolder':'openProject','project.openRecent':'openProject',
+          'project.restoreRecovery':'recovery'} as Record<string,AttemptedAction>)[method] ?? 'project';
+      item.requestId ??= op.requestId;
+      item.operation ??= {action,requestId:op.requestId,ref:ref && 'revision' in ref ? ref as RevisionRef : null,
+        outcome:item.code === 'cancelled' ? 'cancelled' : item.code === 'superseded' ? 'superseded' : item.continuity === 'lost' ? 'unknown' : 'rejected',
+        phase:item.phase,continuity:item.continuity,
+        expectedRuntimeRevision:item.runtime?.expectedRevision ?? null,actualRuntimeRevision:item.runtime?.observedRevision ?? null};
+      throw item;
+    }
   }
   async function projectRequest(method: string, payload: unknown, op: Operation, ref?: ProjectRef, version?: number): Promise<ProjectSnapshot | null> {
     const result = await request<ProjectSnapshot | null>(method, payload, op, ref, version);
@@ -572,36 +676,35 @@ export async function createDesktopHostWithBridge(bridge: DesktopBridge): Promis
     ensure(result !== null, 'Missing project snapshot.'); return result;
   }
   function telemetryRef(ref: RevisionRef): boolean {
-    return engineReady && ref.engineEpoch === engineEpoch && sameProject(ref, currentProject) && (currentRevision === null || sameRef(ref, currentRevision));
+    const retainedPreview = lastProject?.kind === 'changed' && lastProject.snapshot.execution.policy === 'preview' &&
+      currentRevision !== null && sameRef(ref,currentRevision);
+    return engineReady && ref.engineEpoch === engineEpoch &&
+      (sameProject(ref,currentProject) || retainedPreview) && (currentRevision === null || sameRef(ref,currentRevision));
   }
   async function onEvent(raw: unknown) {
     context(raw); object(raw);
     const envelope = raw as Envelope;
-    const nextSequence = u64(envelope.sequence);
     object(envelope.event);
     ensure(['runtime', 'project', 'host'].includes(envelope.event.scope), 'Invalid desktop event scope.');
-    ensure(bytes(raw).length <= caps.limits.frameBytes, 'Event exceeds the frame limit.', 'too_large');
-    if (sequence !== null && nextSequence <= sequence) {
-      if (isTransfer(envelope.event.value)) {
-        id(envelope.event.value.transfer.id);
-        await wire({ ...envelope, requestId: nextOp().requestId }, 'transfer.release',
-          { kind: 'inline', value: { id: envelope.event.value.transfer.id } });
-      }
-      return;
-    }
-    const possiblyEngine = envelope.event.scope === 'runtime' && (isTransfer(envelope.event.value) ||
-      (envelope.event.value as { kind?: unknown } | null)?.kind === 'engine');
+    const rawValue = envelope.event.value;
+    const possiblyEngine = envelope.event.scope === 'runtime' && (isTransfer(rawValue) ||
+      (rawValue !== null && typeof rawValue === 'object' && 'kind' in rawValue && rawValue.kind === 'engine'));
+    const retainedEngineEnvelope = envelope.event.scope === 'runtime' && lastProject?.kind === 'changed' &&
+      lastProject.snapshot.execution.policy === 'preview' && currentRevision !== null &&
+      sameProject(envelope.project,currentRevision) && envelope.engineEpoch === currentRevision.engineEpoch &&
+      envelope.revision === null && envelope.sourceVersion === null;
     const check = () => {
       ensure(!disposed, 'Host is disposed.', 'stale_request');
+      if (retainedEngineEnvelope) return;
       if (envelope.event.scope === 'runtime' && !possiblyEngine) live(envelope);
       else if (envelope.project !== null) ensure(sameProject(envelope.project, currentProject), 'Stale project event.', 'stale_request');
     };
     const value = await transfer(envelope.event.value, envelope, check);
     object(value); id(value.kind);
     check();
-    if (envelope.event.scope === 'runtime' && value.kind !== 'engine') live(envelope);
+    if (envelope.event.scope === 'runtime' && value.kind !== 'engine' &&
+        !(value.kind === 'failure' && retainedEngineEnvelope)) live(envelope);
     if (envelope.event.scope === 'runtime' && value.kind === 'engine' && retiredEngines.has(value.engineEpoch)) return;
-    sequence = nextSequence;
     if (envelope.event.scope === 'runtime') {
       const event = value as RuntimeEvent;
       switch (event.kind) {
@@ -612,10 +715,10 @@ export async function createDesktopHostWithBridge(bridge: DesktopBridge): Promis
           if (retiredEngines.has(event.engineEpoch)) return;
           if (event.engineEpoch !== engineEpoch) {
             retiredEngines.add(engineEpoch); engineEpoch = event.engineEpoch;
-            currentRevision = null; transportGeneration = null; analysisSequence = null; lastStatus = null; lastAnalysis = null;
+            currentRevision = null; transportGeneration = null; statusSequence = null; analysisSequence = null; lastStatus = null; lastAnalysis = null;
           }
           if (event.state === 'failed' || event.state === 'stopped') {
-            currentRevision = null; transportGeneration = null; analysisSequence = null; lastStatus = null; lastAnalysis = null;
+            currentRevision = null; transportGeneration = null; statusSequence = null; analysisSequence = null; lastStatus = null; lastAnalysis = null;
           }
           caps = event.capabilities; lastEngine = event;
           engineReady = event.state === 'ready';
@@ -626,10 +729,11 @@ export async function createDesktopHostWithBridge(bridge: DesktopBridge): Promis
             event.status.ref.sourceVersion === envelope.sourceVersion && event.status.ref.revision === envelope.revision,
             'Status event context mismatch.');
           if (!telemetryRef(event.status.ref)) return;
-          const generation = u64(event.status.generation);
-          if (transportGeneration !== null && generation < transportGeneration) return;
-          if (transportGeneration !== generation) analysisSequence = null;
-          transportGeneration = generation; lastStatus = event;
+          const generation = u64(event.status.generation), next = u64(event.status.sequence);
+          if (transportGeneration !== null && (generation < transportGeneration ||
+              (generation === transportGeneration && statusSequence !== null && next <= statusSequence))) return;
+          if (transportGeneration !== generation) { analysisSequence = null; lastAnalysis = null; }
+          transportGeneration = generation; statusSequence = next; lastStatus = event;
           break;
         }
         case 'analysis': {
@@ -643,6 +747,7 @@ export async function createDesktopHostWithBridge(bridge: DesktopBridge): Promis
           const generation = u64(event.frame.generation), next = u64(event.frame.sequence);
           if (transportGeneration !== null && generation < transportGeneration) return;
           if (generation === transportGeneration && analysisSequence !== null && next <= analysisSequence) return;
+          if (generation !== transportGeneration) statusSequence = null;
           transportGeneration = generation; analysisSequence = next; lastAnalysis = event;
           break;
         }
@@ -658,13 +763,22 @@ export async function createDesktopHostWithBridge(bridge: DesktopBridge): Promis
             if (rebuilding && !rebuilding.accepted) {
               retainSnapshot(rebuilding.snapshot); rebuilding.accepted = true;
             }
-            currentRevision = event.ref; transportGeneration = null; analysisSequence = null; lastStatus = null; lastAnalysis = null;
+            if (currentRevision === null || !sameRef(currentRevision,event.ref)) {
+              currentRevision = event.ref; transportGeneration = null; statusSequence = null; analysisSequence = null;
+              lastStatus = null; lastAnalysis = null;
+            }
           }
           break;
-        case 'entries': id(event.requestId); id(event.snapshot); integer(event.done); integer(event.total); ensure(event.done <= event.total, 'Invalid entry progress.'); break;
+        case 'entries':
+          id(event.requestId); id(event.snapshot); integer(event.done); integer(event.total);
+          ensure(event.requestId === envelope.requestId && event.done <= event.total, 'Invalid entry progress.');
+          if (event.currentEntry !== null) id(event.currentEntry);
+          if (event.result !== null) entryClassification(event.result);
+          break;
         case 'exportProgress':
           id(event.requestId); id(event.job); revisionRef(event.ref);
-          ensure(event.requestId === envelope.requestId && event.ref.engineEpoch === engineEpoch && sameProject(event.ref, currentProject), 'Stale export progress.', 'stale_revision');
+          ensure(event.requestId === envelope.requestId && event.ref.engineEpoch === engineEpoch &&
+            (sameProject(event.ref,currentProject) || telemetryRef(event.ref)), 'Stale export progress.', 'stale_revision');
           ensure(event.ref.revision === envelope.revision && event.ref.sourceVersion === envelope.sourceVersion, 'Export progress context mismatch.');
           ensure(['queued', 'preparing', 'rendering', 'publishing'].includes(event.phase), 'Invalid export phase.');
           if (event.progress !== null) { finite(event.progress); ensure(event.progress >= 0 && event.progress <= 1, 'Invalid export progress.'); }
@@ -700,6 +814,18 @@ export async function createDesktopHostWithBridge(bridge: DesktopBridge): Promis
       emit(hostListeners, event);
     }
   }
+  function scheduleTelemetry() {
+    if (telemetryScheduled || lifecycleBarriers || disposed) return;
+    telemetryScheduled = true;
+    queueMicrotask(() => {
+      telemetryScheduled = false;
+      if (lifecycleBarriers || disposed) return;
+      const retained = Object.values(latestTelemetry).sort((a,b) =>
+        u64(a.sequence) < u64(b.sequence) ? -1 : 1);
+      delete latestTelemetry.status; delete latestTelemetry.analysis;
+      for (const event of retained) void onEvent(event).catch(emitFailure);
+    });
+  }
   const unlisten = await bridge.listen('workbench://event', raw => {
     if (disposed) return;
     try {
@@ -710,17 +836,32 @@ export async function createDesktopHostWithBridge(bridge: DesktopBridge): Promis
         bootstrapEvents.push(raw); bootstrapBytes += size;
         return;
       }
-      object(raw);
-      const kind = raw.event?.scope === 'runtime' ? raw.event?.value?.kind : null;
-      const telemetry = kind === 'status' || kind === 'analysis' ? kind : null;
-      if (telemetry) {
-        const previous = eventQueue.findIndex(item => item.telemetry === telemetry);
-        if (previous >= 0) queuedEventBytes -= eventQueue.splice(previous, 1)[0].size;
-        if (previous >= 0 && telemetry === 'analysis') coalescedAnalysis++;
+      validateEnvelope(raw);
+      const envelope = raw;
+      const nextSequence = u64(envelope.sequence);
+      if (sequence !== null && nextSequence <= sequence) {
+        if (isTransfer(envelope.event.value)) void wire({...envelope,requestId:nextOp().requestId},
+          'transfer.release',{kind:'inline',value:{id:envelope.event.value.transfer.id}}).catch(emitFailure);
+        return;
+      }
+      sequence = nextSequence;
+      const eventValue = envelope.event.value;
+      const kind = envelope.event.scope === 'runtime' && eventValue !== null && typeof eventValue === 'object' &&
+        'kind' in eventValue ? eventValue.kind : null;
+      if (kind === 'status' || kind === 'analysis') {
+        ensure(!envelope.barrier, 'Telemetry cannot establish a lifecycle barrier.');
+        if (latestTelemetry[kind] && kind === 'analysis') coalescedAnalysis++;
+        latestTelemetry[kind] = envelope;
+        scheduleTelemetry();
+        return;
       }
       ensure(eventQueue.length < caps.limits.outstandingRequests * 8 &&
         queuedEventBytes + size <= caps.limits.sourceSnapshotBytes, 'Desktop event queue is full.', 'queue_full');
-      eventQueue.push({ raw, size, telemetry }); queuedEventBytes += size;
+      if (envelope.barrier) {
+        lifecycleBarriers++;
+        delete latestTelemetry.status; delete latestTelemetry.analysis;
+      }
+      eventQueue.push({raw:envelope,size}); queuedEventBytes += size;
       if (!drainingEvents) {
         drainingEvents = true;
         void (async () => {
@@ -728,6 +869,10 @@ export async function createDesktopHostWithBridge(bridge: DesktopBridge): Promis
             while (eventQueue.length && !disposed) {
               const item = eventQueue.shift()!; queuedEventBytes -= item.size;
               try { await onEvent(item.raw); } catch (error) { emitFailure(error); }
+              finally {
+                if (item.raw.barrier) lifecycleBarriers--;
+                scheduleTelemetry();
+              }
             }
           } finally { drainingEvents = false; }
         })();
@@ -757,8 +902,11 @@ export async function createDesktopHostWithBridge(bridge: DesktopBridge): Promis
     if (bootstrapError) throw bootstrapError;
     // Bootstrap is authoritative for identities; an earlier starting epoch cannot roll it back.
     for (const raw of bootstrapEvents) {
-      context(raw);
+      validateEnvelope(raw);
       if (raw.engineEpoch !== null && raw.engineEpoch !== engineEpoch) continue;
+      const nextSequence = u64(raw.sequence);
+      if (sequence !== null && nextSequence <= sequence) continue;
+      sequence = nextSequence;
       await onEvent(raw);
     }
     bootstrapEvents.length = 0; bootstrapping = false;
@@ -787,8 +935,16 @@ export async function createDesktopHostWithBridge(bridge: DesktopBridge): Promis
     },
     async checkEntries(input, op) {
       const captured = snapshots.get(input.snapshot); ensure(captured, 'Unknown source snapshot.', 'stale_request');
+      const scanGeneration = ++entryScanGeneration;
       const result = await request<EntryCheckResult>('runtime.checkEntries', input, op, captured, captured.sourceVersion);
-      object(result); ensure(result.snapshot === input.snapshot && result.sourceVersion === captured.sourceVersion && Array.isArray(result.entries), 'Entry check context mismatch.'); return result;
+      ensure(scanGeneration === entryScanGeneration, 'A newer source scan replaced this reply.', 'superseded');
+      object(result); ensure(result.snapshot === input.snapshot && result.sourceVersion === captured.sourceVersion &&
+        Array.isArray(result.entries) && result.entries.length === input.entries.length, 'Entry check context mismatch.');
+      for (let index = 0; index < result.entries.length; index++) {
+        entryClassification(result.entries[index]);
+        ensure(result.entries[index].entry === input.entries[index], 'Entry classification order mismatch.');
+      }
+      return result;
     },
     async inspect(ref, view, input, op) {
       checkPage(input); const result = await request<InspectionPage>('runtime.inspect', { ref, view, page: input }, op, ref);
@@ -813,13 +969,28 @@ export async function createDesktopHostWithBridge(bridge: DesktopBridge): Promis
       if (command.kind === 'seek') beat(command.beat);
       if (command.kind === 'loop' && command.range !== null) { beat(command.range[0]); beat(command.range[1]); ensure(command.range[1] > command.range[0], 'Loop must be half-open and nonempty.', 'invalid_source'); }
       const result = await request<TransportStatus>('runtime.transport', { ref, command }, op, ref);
-      status(result, caps.limits); ensure(sameRef(result.ref, ref), 'Transport response mismatch.');
+      status(result, caps.limits);
+      const global = ['play','pause','stop','panic'].includes(command.kind);
+      ensure(sameRef(result.ref, ref) || (global && sameProject(result.ref, ref) &&
+        result.ref.engineEpoch === ref.engineEpoch && result.ref.sourceVersion >= ref.sourceVersion),
+        'Transport response mismatch.');
       const generation = u64(result.generation);
-      ensure(transportGeneration === null || generation >= transportGeneration, 'Transport response is stale.', 'stale_transport');
-      transportGeneration = generation; lastStatus = { kind: 'status', status: result }; return result;
+      // The reply is an authoritative applied receipt even if newer telemetry or
+      // acceptance has already advanced the displayed state. Never recast it as rejection.
+      const next = u64(result.sequence);
+      if (telemetryRef(result.ref) && (transportGeneration === null || generation > transportGeneration ||
+          (generation === transportGeneration && (statusSequence === null || next > statusSequence)))) {
+        if (generation !== transportGeneration) { analysisSequence = null; lastAnalysis = null; }
+        transportGeneration = generation; statusSequence = next; lastStatus = { kind: 'status', status: result };
+      }
+      return result;
     },
     async audition(ref, controls, op) { await request('runtime.audition', { ref, controls }, op, ref); },
-    async analysis(ref, source, enabled) { await request('runtime.analysis', { ref, source, enabled }, nextOp(), ref); },
+    async analysis(ref, subscription) {
+      ensure(subscription.detailHz <= caps.limits.analysisHz && subscription.meterHz <= caps.limits.statusHz,
+        'Analysis cadence exceeds the negotiated budget.', 'resource_budget');
+      await request('runtime.analysis', { ref, subscription }, nextOp(), ref);
+    },
     async export(ref, spec, op) {
       if (spec.kind === 'wav') { finite(spec.start); finite(spec.end); ensure(spec.start >= 0 && spec.end > spec.start && [44100, 48000, 96000].includes(spec.rate) && [16, 24].includes(spec.bits), 'Invalid WAV export range or format.', 'invalid_source'); }
       const result = await request<ExportResult>('runtime.export', { ref, spec }, op, ref);
@@ -854,6 +1025,7 @@ export async function createDesktopHostWithBridge(bridge: DesktopBridge): Promis
     },
     newProject: (settings, op) => requiredProject('project.newProject', { settings }, op),
     importProject: (input, op) => projectRequest('project.importProject', { input }, op),
+    trustAndRun: (input, op) => projectRequest('project.trustAndRun', {input}, op, input.project),
     async readLibraryDocument(input, op) {
       const result = await request<{ id: string; path: string; text: string; kind: 'source' | 'document' | 'text' }>('project.readLibraryDocument', { input }, op, input.project);
       object(result); ensure(result.id === input.id && typeof result.path === 'string' && typeof result.text === 'string' && ['source', 'document', 'text'].includes(result.kind), 'Invalid library document.'); return result;
@@ -931,7 +1103,7 @@ export async function createDesktopHostWithBridge(bridge: DesktopBridge): Promis
       closePermission = null;
       // Replacement consumes permission, not the workspace. A chooser may still cancel.
       if (permission.reason === 'replaceProject') return;
-      currentProject = null; currentSourceVersion = null; currentRevision = null; transportGeneration = null; analysisSequence = null;
+      currentProject = null; currentSourceVersion = null; currentRevision = null; transportGeneration = null; statusSequence = null; analysisSequence = null;
       clearSnapshots(); lastProject = null; lastStatus = null; lastAnalysis = null;
     },
     subscribe(listener) {
@@ -988,7 +1160,7 @@ export async function createDesktopHostWithBridge(bridge: DesktopBridge): Promis
             snapshot(retained, caps.limits); setProject(retained);
           }
         }
-        currentRevision = null; transportGeneration = null; analysisSequence = null;
+        currentRevision = null; transportGeneration = null; statusSequence = null; analysisSequence = null;
         lastStatus = null; lastAnalysis = null; engineReady = true;
         runtimeDisposed = false; runtimeDisposePromise = undefined;
       }
@@ -1009,6 +1181,7 @@ export async function createDesktopHostWithBridge(bridge: DesktopBridge): Promis
           runtimeListeners.clear(); projectListeners.clear(); hostListeners.clear();
           clearSnapshots(); recoveries.clear(); reliableBacklog.length = 0;
           eventQueue.length = 0; queuedEventBytes = 0;
+          delete latestTelemetry.status; delete latestTelemetry.analysis;
         }
       })();
     },

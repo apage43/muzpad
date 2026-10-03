@@ -18,6 +18,23 @@ const projectsURL = await moduleURL("../src/host/web-projects.ts", {
   "../gist.js": new URL("../src/gist.js", import.meta.url).href,
 });
 const { WebProjectStore } = await import(projectsURL);
+const audioFixtureURL = "data:text/javascript;base64," + Buffer.from(`
+export class Compiler {
+  calls=[];
+  async call(message){this.calls.push(message);return message.command==="check_entry"?{kind:"song",failure:null}:{};}
+  dispose(){}
+}
+export class AudioPlayer {
+  playing=false;context={sampleRate:48000};loop=null;
+  setAnalysisEnabled(){}
+  selectAnalysis(){}
+  async shutdown(){}
+}
+export class WebPreferencesStore {}
+`).toString("base64");
+const runtimeURL=await moduleURL("../src/host/web.ts",{"../audio":audioFixtureURL,
+  "./web-projects":projectsURL,"./web-preferences":audioFixtureURL});
+const {WebRuntime}=await import(runtimeURL);
 
 class MemoryStorage {
   values = new Map();
@@ -563,4 +580,75 @@ test("browser source resolution keeps canonical buffers and readonly catalog doc
   await assert.rejects(subject.resolveSourceDocument({ project, path: "/ungranted/song.muz" }, operation()), /project-relative/);
   await assert.rejects(subject.resolveSourceDocument({ project: { ...project, epoch: "stale" }, path: "song.muz" }, operation()),
     error => error.code === "stale_request");
+});
+
+test("entry defaults retain explicit missing selection and declared order; capture still includes alternatives",async()=>{
+  const subject=await store();
+  const files={"a.muz":"null","main.muz":"null","song.MUZ":"null","README.md":"# Guide"};
+  const metadata={entry:"missing.muz",entries:["module.muz","README.md","main.muz","missing.muz"]};
+  const state=await subject.fromFiles({...files,"muzpad.json":JSON.stringify(metadata)},{},"Fixture");
+  const snapshot=await subject.install(state,operation());
+  assert.equal(snapshot.entry,"missing.muz");
+  assert.deepEqual(snapshot.entries,metadata.entries);
+  assert.deepEqual(snapshot.execution,{trusted:true,policy:"sandbox"});
+  const captured=await subject.snapshotSources(capture(snapshot),operation());
+  assert.equal(captured.entry,"missing.muz");
+  assert.deepEqual(Object.keys(subject.getSourceSnapshot(captured.id).files).filter(path=>!path.startsWith("std/")&&!path.startsWith("docs/")).sort(),Object.keys(files).sort());
+  const defaults=await subject.fromFiles(files,{},"Defaults");
+  assert.equal(defaults.settings.entry,"main.muz");
+  const nonSource=await subject.fromFiles({...files,"muzpad.json":JSON.stringify({...metadata,entry:"README.md"})},{},"Document selection");
+  assert.equal(nonSource.settings.entry,"README.md","declared non-source selection is explained, not rewritten");
+  assert.deepEqual(nonSource.settings.entries,metadata.entries);
+});
+
+test("deleted selected entry does not block classifying captured remaining sources or revive disk tombstone",async()=>{
+  const subject=await store();
+  const snapshot=await subject.importProject({kind:"content",project:{settings:{title:"Fixture",entry:"song.muz"},
+    files:[{path:"song.muz",text:"null"},{path:"alternate.MUZ",text:"null"}],assets:[]}},operation());
+  const deleted=edit(snapshot,"song.muz",null);
+  const source=await subject.snapshotSources(capture(deleted),operation());
+  const files=subject.getSourceSnapshot(source.id).files;
+  assert.equal(Object.hasOwn(files,"song.muz"),false);
+  assert.equal(files["alternate.MUZ"],"null");
+});
+
+test("missing project root never borrows bundled catalog music while alternatives and import authority remain captured",async()=>{
+  const root="examples/envelope-timing.muz";
+  globalThis.fetch=async()=>({ok:true,json:async()=>({engine:{commit:"core"},libraries:{[root]:"song({tracks:[]})"}})});
+  const subject=await store();
+  const snapshot=await subject.importProject({kind:"content",project:{
+    settings:{title:"Missing entry",entry:root,entries:[root,"alternate.muz"]},
+    files:[{path:"alternate.muz",text:`use "${root}" as p; p.main`}],assets:[],
+  }},operation());
+  const captured=await subject.snapshotSources(capture(snapshot),operation());
+  assert.equal(subject.getSourceSnapshot(captured.id).files[root],"song({tracks:[]})","catalog remains available to authored imports");
+  const runtime=new WebRuntime(subject,"core");
+  try{
+    const result=await runtime.checkEntries({snapshot:captured.id,entries:[root,"alternate.muz"]},operation());
+    assert.equal(result.entries[0].kind,"unresolved");
+    assert.equal(result.entries[0].failure.code,"missing_module");
+    assert.equal(result.entries[1].kind,"song");
+    assert.deepEqual(runtime.utilityCompiler.calls.filter(message=>message.command==="check_entry").map(message=>message.entry),["alternate.muz"]);
+    await assert.rejects(runtime.rebuild({snapshot:captured.id,base:null},operation()),{code:"missing_module"});
+    assert.equal(runtime.compiler.calls.some(message=>message.command==="compile"),false);
+  }finally{await runtime.dispose();}
+});
+
+test("successful project installation emits a recovery issue without impersonating the authoritative Save outcome",async()=>{
+  const subject=await store(),events=[];
+  subject.subscribe(event=>events.push(event));
+  localStorage.denied=true;
+  const op=operation();
+  const selected=await subject.newProject({title:"Retained selection",entry:"song.muz"},op);
+  assert.equal(selected.title,"Retained selection");
+  const issue=events.filter(event=>event.kind==="failure").at(-1).failure;
+  assert.equal(issue.requestId,op.requestId);
+  assert.equal(issue.operation.action,"recovery");
+  assert.equal(issue.operation.outcome,"rejected");
+  events.length=0;
+  const working=capture(selected);
+  const saved=await subject.save({project:working.project,epoch:working.epoch,files:working.buffers,
+    settings:working.settings,settingsDiskVersion:working.settingsDiskVersion},operation());
+  assert.ok(saved.failures.length>0);
+  assert.equal(events.some(event=>event.kind==="failure"),false,"Save failure is owned by SaveResult, not a competing generic event");
 });

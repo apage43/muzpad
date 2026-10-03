@@ -4,7 +4,10 @@ import { readFile } from "node:fs/promises";
 import { stripTypeScriptTypes } from "node:module";
 
 const source = await readFile(new URL("../src/host/web-preferences.ts", import.meta.url), "utf8");
-const outputText = stripTypeScriptTypes(source);
+const preferencesSource = stripTypeScriptTypes(await readFile(new URL("../src/preferences.ts",import.meta.url),"utf8"));
+const preferencesURL = "data:text/javascript;base64," + Buffer.from(preferencesSource).toString("base64");
+const {PreferencesController} = await import(preferencesURL);
+const outputText = stripTypeScriptTypes(source).replace('from "../preferences"',`from ${JSON.stringify(preferencesURL)}`);
 const { WebPreferencesStore } = await import("data:text/javascript;base64," + Buffer.from(outputText).toString("base64"));
 function storage(initial) {
   const values = new Map(Object.entries(initial));
@@ -68,4 +71,41 @@ test("a denied storage getter keeps each save rejected while retaining session s
     if (descriptor) Object.defineProperty(globalThis, "localStorage", descriptor);
     else delete globalThis.localStorage;
   }
+});
+
+test("empty browser origin uses shared source-primary progressive defaults without synthesizing a saved choice",async()=>{
+  const disk=storage({}),store=new WebPreferencesStore(()=>{},disk);
+  assert.equal(await store.load(),null);
+  const controller=await PreferencesController.load(store);
+  assert.equal(controller.value.layout.source,true);
+  assert.equal(controller.value.layout.visualization,true);
+  assert.ok(controller.value.layout.sourceFraction>0.5,"source owns the majority of the primary split");
+  assert.equal(controller.value.layout.inspector,false,"optional inspector starts progressively disclosed");
+  assert.equal(disk.getItem("muzpad-preferences-v1"),null,"absence must not become a synthetic historical layout");
+});
+
+test("legacy theme alone does not invent an inspector-open choice; explicit legacy inspector choices survive migration",async()=>{
+  const themeOnly=await PreferencesController.load(new WebPreferencesStore(()=>{},storage({"muzpad-theme":"dark"})));
+  assert.equal(themeOnly.value.theme,"dark");assert.equal(themeOnly.value.layout.inspector,false);
+  assert.ok(themeOnly.value.layout.sourceFraction>0.5);
+  for(const [choice,expected] of [["open",true],["closed",false]]){
+    const disk=storage({"muzpad-inspector":choice});
+    const controller=await PreferencesController.load(new WebPreferencesStore(()=>{},disk));
+    assert.equal(controller.value.layout.inspector,expected);
+    assert.ok(controller.value.layout.sourceFraction>0.5,"legacy has no saved split fraction to override the shared default");
+    assert.equal(disk.getItem("muzpad-inspector"),null);
+  }
+});
+
+test("genuine saved v1 layout remains exact while reset alone restores shared progressive source-primary behavior",async()=>{
+  const saved={version:1,theme:"soft-dark",layout:{explorer:false,source:true,visualization:false,inspector:true,sourceFraction:0.43}};
+  const disk=storage({"muzpad-preferences-v1":JSON.stringify(saved),"muzpad-inspector":"closed"});
+  const controller=await PreferencesController.load(new WebPreferencesStore(()=>{},disk));
+  assert.deepEqual(controller.value,saved);
+  controller.resetLayout();
+  assert.equal(controller.value.theme,saved.theme);
+  assert.equal(controller.value.layout.inspector,false);
+  assert.equal(controller.value.layout.source,true);
+  assert.equal(controller.value.layout.visualization,true);
+  assert.ok(controller.value.layout.sourceFraction>0.5);
 });

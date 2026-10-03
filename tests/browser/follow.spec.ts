@@ -43,7 +43,7 @@ test("following never exposes a frame with unpaged notes", async ({ page }) => {
   await page.locator("#follow").click();
   await expect(page.locator("#arrangement")).toHaveAttribute(
     "data-inspection-state",
-    "detail",
+    "ready",
   );
   await page.locator("#play").click();
   const frames = await page.evaluate(async () => {

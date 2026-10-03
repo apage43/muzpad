@@ -15,9 +15,101 @@ fn start(service: &mut ProjectService) {
 }
 fn capture(service: &ProjectService) -> WorkingCapture { service.state.lock().as_ref().unwrap().working_capture() }
 fn change(mut capture: WorkingCapture, text: &str) -> WorkingCapture { capture.source_version += 1; capture.buffers[0].buffer_version += 1; capture.buffers[0].text = Some(text.into()); capture }
+fn restore_recovery(service: &mut ProjectService, input: Value) -> Result<Value, Failure> {
+    let context = Context::host(None,service.current_ref());
+    service.dispatch("project.restoreRecovery",json!({"input":input}),&context)
+}
+fn permit_replacement(service: &mut ProjectService) {
+    let permitted=service.prepare_close(&json!({"capture":capture(service),"reason":"replaceProject","decision":"discard","ticket":null}),0).unwrap();
+    let reference=service.current_ref().unwrap();
+    service.close(&json!({"project":reference.project,"epoch":reference.epoch,"token":permitted["token"]})).unwrap();
+}
 
 #[test]
 fn service_is_send_and_plain_data_never_contains_runtime_handles() { fn require_send<T: Send>() {} require_send::<ProjectService>(); }
+
+#[test]
+fn native_default_root_prefers_song_then_main_then_lexical_without_evaluating() {
+    for (paths,expected) in [
+        (vec!["z.muz","main.muz","song.muz"],"song.muz"),
+        (vec!["a.muz","main.muz","nested/song.muz"],"main.muz"),
+        (vec!["z.muz","nested/a.muz","b.muz"],"b.muz"),
+    ] {
+        let (dir,mut service)=service();let root=dir.path().join("root");std::fs::create_dir(&root).unwrap();
+        for path in paths{let file=root.join(path);std::fs::create_dir_all(file.parent().unwrap()).unwrap();std::fs::write(file,"not evaluated to choose an entry").unwrap();}
+        let opened=service.open_folder(root,None).unwrap();service.watcher.stop();
+        assert_eq!(opened["entry"],expected);assert_eq!(opened["execution"]["policy"],"account-native");
+    }
+}
+
+#[test]
+fn imported_preview_preserves_previous_dirty_buffers_snapshot_and_parent_trust_on_cancel() {
+    let (dir,mut service)=service();start(&mut service);
+    let dirty=change(capture(&service),"trusted dirty draft");service.acknowledge(&dirty).unwrap();
+    let before=service.current().unwrap();let accepted=service.capture_sources(capture(&service)).unwrap();
+    let id=accepted["id"].as_str().unwrap();service.retain_accepted_snapshot(id).unwrap();
+    let permitted=service.prepare_close(&json!({"capture":capture(&service),"reason":"replaceProject","decision":"discard","ticket":null}),0).unwrap();
+    let reference=service.current_ref().unwrap();service.close(&json!({"project":reference.project,"epoch":reference.epoch,"token":permitted["token"]})).unwrap();
+    let preview=service.import_project(json!({"kind":"content","project":{"settings":settings(),"files":[{"path":"main.muz","text":"untrusted preview"}],"assets":[]}})).unwrap();
+    service.watcher.stop();assert_eq!(preview["execution"]["policy"],"preview");assert_eq!(service.require_trusted().unwrap_err().code,"trust_required");
+    let external=dir.path().join("outside.muz");std::fs::write(&external,"external module").unwrap();
+    assert_eq!(service.library_document(&json!({"project":service.current_ref(),"id":external})).unwrap_err().code,"trust_required");
+    assert_eq!(service.snapshot_transfer(id).unwrap().1[0].1,"trusted dirty draft");
+    let recovery=operations::recovery_record(service.state.lock().as_ref().unwrap());assert_eq!(recovery["trusted"],false);
+    let restored=service.restore_preview().unwrap().unwrap();assert_eq!(restored,before);
+    assert_eq!(service.retained_snapshot().as_deref(),Some(id));assert!(service.trusted_read());
+}
+#[cfg(unix)]
+#[test]
+fn preview_cancel_reconciles_consumed_dependencies_and_same_content_link_retargets(){
+    use std::os::unix::fs::symlink;
+    for retarget in [false,true]{
+        let (dir,mut service)=service();start(&mut service);
+        let first=dir.path().join("external-one.muz");let second=dir.path().join("external-two.muz");let alias=dir.path().join("external-link.muz");
+        std::fs::write(&first,"external source").unwrap();std::fs::write(&second,"external source").unwrap();symlink(&first,&alias).unwrap();
+        let descriptor=service.capture_sources(capture(&service)).unwrap();
+        let dependencies=json!([{"grant":"account-native","path":alias,"canonical":first,"version":digest(b"external source")}]);
+        service.validate_snapshot(descriptor["id"].as_str().unwrap(),&dependencies).unwrap();
+        service.retain_accepted_snapshot(descriptor["id"].as_str().unwrap()).unwrap();
+        let before=service.current().unwrap();permit_replacement(&mut service);
+        service.import_project(json!({"kind":"content","project":{"settings":settings(),"files":[{"path":"main.muz","text":"preview"}],"assets":[]}})).unwrap();
+        if retarget{std::fs::remove_file(&alias).unwrap();symlink(&second,&alias).unwrap();}
+        else{std::fs::write(&first,"changed external source").unwrap();}
+        let restored=service.restore_preview().unwrap().unwrap();
+        assert_eq!(restored["project"],before["project"]);assert!(service.trusted_read());
+        assert_eq!(restored["sourceVersion"].as_u64().unwrap(),before["sourceVersion"].as_u64().unwrap()+1);
+        assert_eq!(service.validate_retained_snapshot(descriptor["id"].as_str().unwrap(),&dependencies).unwrap_err().code,"source_conflict");
+    }
+}
+#[cfg(unix)]
+#[test]
+fn preview_cancel_invalidates_a_dependency_replaced_with_fifo_without_blocking(){
+    use std::{ffi::CString,os::unix::ffi::OsStrExt,time::{Duration,Instant}};
+    let (dir,mut service)=service();start(&mut service);
+    let path=dir.path().join("external.muz");std::fs::write(&path,"external source").unwrap();
+    let descriptor=service.capture_sources(capture(&service)).unwrap();
+    service.validate_snapshot(descriptor["id"].as_str().unwrap(),&json!([{"grant":"account-native","path":path,"canonical":path,"version":digest(b"external source")}])).unwrap();
+    let before=service.current().unwrap();permit_replacement(&mut service);
+    service.import_project(json!({"kind":"content","project":{"settings":settings(),"files":[{"path":"main.muz","text":"preview"}],"assets":[]}})).unwrap();
+    std::fs::remove_file(&path).unwrap();let name=CString::new(path.as_os_str().as_bytes()).unwrap();assert_eq!(unsafe{libc::mkfifo(name.as_ptr(),0o600)},0);
+    let started=Instant::now();let restored=service.restore_preview().unwrap().unwrap();
+    assert!(started.elapsed()<Duration::from_secs(1));assert!(service.trusted_read());
+    assert_eq!(restored["sourceVersion"].as_u64().unwrap(),before["sourceVersion"].as_u64().unwrap()+1);
+}
+#[test]
+fn untrusted_recovery_is_staged_without_publishing_or_replacing_current_authority(){
+    let (_dir,mut service)=service();start(&mut service);
+    let mut recovered=service.unsaved(settings(),None).unwrap();recovered.trusted=false;
+    let record=operations::recovery_record(&recovered);service.storage.put_recovery(&record).unwrap();
+    let before=service.current().unwrap();let descriptor=service.capture_sources(capture(&service)).unwrap();
+    permit_replacement(&mut service);
+    assert!(service.stage_recovery(&json!({"id":record["id"],"action":"restore"})).unwrap());
+    assert_eq!(service.current().unwrap(),before);assert!(service.trusted_read());
+    assert!(service.snapshot_transfer(descriptor["id"].as_str().unwrap()).is_ok());
+    let preview=service.install_staged_project().unwrap();assert_eq!(preview["execution"]["policy"],"preview");
+    assert_eq!(service.preview_project().unwrap().project,before["project"].as_str().unwrap());
+    assert_eq!(service.restore_preview().unwrap().unwrap(),before);
+}
 
 #[test]
 fn captures_include_closed_new_and_deleted_buffers_and_reject_older_text() {
@@ -52,16 +144,23 @@ fn immutable_snapshot_keeps_dirty_bytes_and_gate_rejects_disk_race() {
 }
 
 #[test]
-fn clean_library_versions_are_pinned_and_accepted_snapshots_survive_candidates() {
+fn demand_library_versions_are_pinned_and_accepted_snapshots_survive_candidates() {
     let (dir,mut service) = service(); start(&mut service);
     let library = dir.path().join("resources/library/contrib/test/module.muz"); std::fs::write(&library,"library one").unwrap();
     let first = service.capture_sources(capture(&service)).unwrap(); let first_id = first["id"].as_str().unwrap().to_owned();
+    assert_eq!(service.snapshot_transfer(&first_id).unwrap().1.len(),1,"Unvisited library sources must not be captured");
     assert!(service.retained_snapshot().is_none()); service.retain_accepted_snapshot(&first_id).unwrap();
     for n in 0..7 { let next = change(capture(&service),&format!("candidate {n}")); service.capture_sources(next).unwrap(); }
     assert!(service.snapshot_transfer(&first_id).is_ok()); assert_eq!(service.retained_snapshot(),Some(first_id.clone()));
     std::fs::write(&library,"library two").unwrap();
     let current_id = service.snapshot_order.back().unwrap();
-    assert_eq!(service.validate_snapshot(current_id,&json!([])).unwrap_err().code,"source_conflict");
+    service.validate_snapshot(current_id,&json!([])).unwrap();
+    let checked=service.capture_sources(change(capture(&service),"consuming library")).unwrap();
+    let current_id=checked["id"].as_str().unwrap();
+    let dependency=json!([{"grant":"account-native","path":library,"canonical":library,"version":digest(b"library two")}]);
+    service.validate_snapshot(current_id,&dependency).unwrap();
+    std::fs::write(&library,"library three").unwrap();
+    assert_eq!(service.validate_snapshot(current_id,&dependency).unwrap_err().code,"source_conflict");
 }
 
 #[test]
@@ -87,7 +186,7 @@ fn durable_restore_preserves_a_newer_disk_as_conflict() {
     service.acknowledge(&change(capture(&service),"draft")).unwrap(); service.persist_current().unwrap();
     let id = service.current_ref().unwrap().project; *service.state.lock() = None;
     std::fs::write(root.join("main.muz"),"external").unwrap();
-    let restored = service.restore_recovery(&json!({"id":id,"action":"restore"})).unwrap();
+    let restored = restore_recovery(&mut service,json!({"id":id,"action":"restore"})).unwrap();
     assert_eq!(restored["conflicts"][0]["local"],"draft"); assert_eq!(restored["conflicts"][0]["disk"],"external");
 }
 
@@ -227,13 +326,13 @@ fn continuation_gist_validates_ingress_without_granting_capabilities() {
         let mut invalid = imported.clone(); invalid["gist"] = gist;
         assert!(decode::<Imported>(invalid).is_err());
     }
-    let before = service.read_grants();
+    let before = service.read_bindings();
     let gist = format!("{}/{}", "a".repeat(32), "b".repeat(40));
     let mut valid = imported.clone(); valid["gist"] = json!(gist);
     let snapshot = service.import_project(json!({"kind":"content","project":valid.clone()})).unwrap();
     service.watcher.stop();
     assert_eq!(snapshot["gist"],gist);
-    assert_eq!(service.read_grants().len(),before.len() + 1);
+    assert_eq!(service.read_bindings().len(),before.len() + 1);
     assert!(!service.grants.iter().any(|grant| grant.id.starts_with("external:")));
     let archive_path = dir.path().join("gist.zip");
     io::write_archive(service.state.lock().as_ref().unwrap(), &archive_path).unwrap();
@@ -259,12 +358,12 @@ fn continuation_gist_survives_recovery_first_save_recent_and_newer_disk_relaunch
     let id = snapshot["project"].as_str().unwrap().to_owned();
     assert_eq!(service.storage.recovery_records().unwrap()[0]["gist"],gist);
     *service.state.lock() = None;
-    assert_eq!(service.restore_recovery(&json!({"id":id,"action":"restore"})).unwrap()["gist"],gist);
+    assert_eq!(restore_recovery(&mut service,json!({"id":id,"action":"restore"})).unwrap()["gist"],gist);
     let root = dir.path().join("Gist Ω with spaces"); std::fs::create_dir(&root).unwrap();
     operations::adopt_save_destination(service.state.lock().as_mut().unwrap(),Arc::new(Root::open(&root).unwrap())).unwrap();
     let working = capture(&service);
     let saved = service.save(SaveInput { project:working.project.clone(),epoch:working.epoch.clone(),files:working.buffers.clone(),settings:working.settings.clone(),settings_disk_version:working.settings_disk_version.clone() },Some(working.source_version)).unwrap();
-    assert!(saved["failures"].as_array().unwrap().is_empty());
+    assert!(saved["failures"].as_array().unwrap().is_empty(),"{saved}");
     assert_eq!(service.list_recent().unwrap()[0]["gist"],gist);
     assert!(serde_json::from_slice::<Value>(&std::fs::read(root.join(SETTINGS)).unwrap()).unwrap().get("gist").is_none());
     service.acknowledge(&change(capture(&service),"recovered unsaved edit")).unwrap();
@@ -276,7 +375,7 @@ fn continuation_gist_survives_recovery_first_save_recent_and_newer_disk_relaunch
     let opened = relaunched.open_folder(root,None).unwrap();
     assert_eq!(opened["gist"],gist); assert_eq!(opened["project"],id);
     *relaunched.state.lock() = None;
-    let restored = relaunched.restore_recovery(&json!({"id":id,"action":"restore"})).unwrap();
+    let restored = restore_recovery(&mut relaunched,json!({"id":id,"action":"restore"})).unwrap();
     assert_eq!(restored["gist"],gist);
     assert_eq!(restored["conflicts"][0]["local"],"recovered unsaved edit");
     assert_eq!(restored["conflicts"][0]["disk"],"newer external disk");
@@ -388,8 +487,8 @@ fn continuation_security_capture_and_failed_save_veto_all_close_reasons() {
     assert_eq!(service.snapshot_transfer(id).unwrap().1.iter().find(|(file,_)|file["path"] == "main.muz").unwrap().1,"dirty");
     let outside = dir.path().join("outside.muz"); std::fs::write(&outside,"secret").unwrap();
     let reference = service.current_ref().unwrap();
-    let denied = service.library_document(&json!({"project":reference,"id":outside})).unwrap_err();
-    assert_eq!(denied.code,"grant_required");
+    let readable = service.library_document(&json!({"project":reference,"id":outside})).unwrap();
+    assert_eq!(readable["text"],"secret");
     for path in ["../outside.muz","/etc/passwd","new/../../outside.muz","x\\y.muz"] {
         let mut invalid = capture(&service); invalid.source_version += 1;
         invalid.buffers.push(Capture { file_id:"escape".into(),path:path.into(),text:Some("bad".into()),buffer_version:1,expected_disk_version:None });
@@ -450,7 +549,7 @@ fn continuation_interrupted_multifile_save_relaunch_preserves_staging_and_draft(
     assert_eq!(std::fs::read_to_string(interrupted[0]["backup"].as_str().unwrap()).unwrap(),"local other.muz");
     let mut relaunched = ProjectService::new(dir.path().join("data"),dir.path().join("config"),dir.path().join("resources"),Arc::new(|_|{})).unwrap();
     relaunched.watcher.stop();
-    let restored = relaunched.restore_recovery(&json!({"id":opened["project"],"action":"restore"})).unwrap();
+    let restored = restore_recovery(&mut relaunched,json!({"id":opened["project"],"action":"restore"})).unwrap();
     assert!(restored["files"].as_array().unwrap().iter().all(|file|file["text"].as_str().unwrap().starts_with("local ")));
     assert_eq!(std::fs::read_to_string(root_path.join("other.muz")).unwrap(),"other base");
 }
@@ -505,7 +604,7 @@ fn continuation_snapshot_default_entries_roundtrip_does_not_invent_source_versio
 }
 
 #[test]
-fn continuation_ui_library_ids_preserve_echo_and_existing_read_authority() {
+fn continuation_ui_library_ids_preserve_echo_and_trusted_account_reads() {
     let (dir, mut service) = service(); start(&mut service);
     let reference = service.current_ref().unwrap();
     let (name, text) = muz::lang::STANDARD_MODULES.first().unwrap();
@@ -519,9 +618,6 @@ fn continuation_ui_library_ids_preserve_echo_and_existing_read_authority() {
     let outside = dir.path().join("outside"); std::fs::create_dir(&outside).unwrap();
     let document = outside.join("module Ω.muz"); std::fs::write(&document,"authorized module").unwrap();
     let id = format!("library:{}",document.display());
-    assert_eq!(service.library_document(&json!({"project":reference,"id":id})).unwrap_err().code,"grant_required");
-    let root = Arc::new(Root::open(&outside).unwrap());
-    service.grants.push(Grant { id:"external:test".into(),kind:"library",path:outside,root,exact:None });
     let authorized = service.library_document(&json!({"project":reference,"id":id})).unwrap();
     assert_eq!(authorized["id"],id); assert_eq!(authorized["text"],"authorized module");
     for id in ["library:../outside/module Ω.muz","library:contrib/../../outside/module Ω.muz"] {
@@ -573,7 +669,7 @@ fn closure_retained_save_authority_preserves_captured_text_and_disk_resources() 
         assert_eq!(service.validate_retained_snapshot(id,&restarted).unwrap_err().code,"changed_asset");
         std::fs::write(destination.join("sample.wav"),b"pinned asset").unwrap();
         std::fs::write(dir.path().join("resources/library/module.muz"),"changed library").unwrap();
-        assert_eq!(service.validate_retained_snapshot(id,&restarted).unwrap_err().code,"source_conflict");
+        service.validate_retained_snapshot(id,&restarted).unwrap();
     }
 }
 
@@ -599,15 +695,18 @@ fn closure_import_reclaims_partial_orphans_and_preserves_recovery_assets() {
     let saved = save_working(&mut service); assert_eq!(saved["settingsSaved"],true,"{saved}");
     assert!(!saved_private.exists()); assert!(active.exists());
     assert_eq!(std::fs::read(destination.join("one.wav")).unwrap(),b"recoverable bytes");
-    service.restore_recovery(&json!({"id":reference.project,"action":"discard"})).unwrap();
-    assert!(!active.exists());
+    restore_recovery(&mut service,json!({"id":reference.project,"action":"discard"})).unwrap();
+    assert!(active.exists(),"Cancel-preview still owns the previous workspace after its recovery offer is discarded");
+    let saved_project=service.current_ref().unwrap().project;
+    permit_replacement(&mut service);service.open_folder(destination.clone(),Some(saved_project)).unwrap();
+    assert!(!active.exists(),"A genuine trusted-folder cutover releases the previous preview root");
     for index in 0..180 { std::fs::create_dir(service.workspace_dir.join(format!("orphan-{index}"))).unwrap(); }
     service.reclaim_private_workspaces_checked().unwrap(); service.reclaim_private_workspaces_checked().unwrap();
     assert_eq!(std::fs::read_dir(&service.workspace_dir).unwrap().count(),0);
 }
 
 #[test]
-fn closure_source_identity_resolver_obeys_roots_exact_grants_and_existing_buffers() {
+fn closure_source_identity_resolver_preserves_project_buffers_and_canonical_account_reads() {
     let (dir,mut service) = service(); start(&mut service);
     let project_root = service.state.lock().as_ref().unwrap().root.path().to_owned();
     let reference = service.current_ref().unwrap();
@@ -619,19 +718,16 @@ fn closure_source_identity_resolver_obeys_roots_exact_grants_and_existing_buffer
     let outside = dir.path().join("Outside Ω"); std::fs::create_dir(&outside).unwrap();
     std::fs::write(outside.join("main.muz"),"external same basename").unwrap();
     std::fs::write(outside.join("other.muz"),"ungranted sibling").unwrap();
-    assert_eq!(resolve(&service,outside.join("main.muz")).unwrap_err().code,"denied_path");
-    let root = Arc::new(Root::open(&outside).unwrap());
-    service.grants.push(Grant { id:"external:exact".into(),kind:"library",path:outside.clone(),root,exact:Some("main.muz".into()) });
     let readonly = resolve(&service,outside.join("main.muz")).unwrap();
     assert_eq!(readonly["kind"],"library"); assert_eq!(readonly["text"],"external same basename");
     assert_eq!(service.library_document(&json!({"project":reference,"id":readonly["id"]})).unwrap()["text"],readonly["text"]);
-    assert_eq!(resolve(&service,outside.join("other.muz")).unwrap_err().code,"denied_path");
+    assert_eq!(resolve(&service,outside.join("other.muz")).unwrap()["text"],"ungranted sibling");
     std::fs::remove_file(outside.join("main.muz")).unwrap();
     std::os::unix::fs::symlink(outside.join("other.muz"),outside.join("main.muz")).unwrap();
-    assert_eq!(resolve(&service,outside.join("main.muz")).unwrap_err().code,"denied_path");
+    assert_eq!(resolve(&service,outside.join("main.muz")).unwrap()["path"],outside.join("other.muz").to_string_lossy().as_ref());
     std::fs::rename(&outside,dir.path().join("old outside")).unwrap(); std::fs::create_dir(&outside).unwrap();
     std::fs::write(outside.join("main.muz"),"replacement root").unwrap();
-    assert_eq!(resolve(&service,outside.join("main.muz")).unwrap_err().code,"root_missing");
+    assert_eq!(resolve(&service,outside.join("main.muz")).unwrap()["text"],"replacement root");
 }
 
 #[test]
@@ -736,7 +832,7 @@ fn native_captured_rebuild(service: &ProjectService, id: &str, retained: bool, e
     let mut context = Context::host(Some(engine.epoch.clone()),service.current_ref()); context.source_version = snapshot["sourceVersion"].as_u64();
     let mut request = |command:&str,args:Value| { context.request_id = opaque(); engine.request_timeout(&context,command,args,Some(Duration::from_secs(15))).unwrap() };
     request("hello",json!({"coreRevision":env!("MUZPAD_CORE_REVISION"),"limits":crate::protocol::limits()}));
-    request("configureProject",json!({"project":service.current_ref(),"readGrants":service.read_grants()}));
+    request("configureProject",json!({"project":service.current_ref(),"readBindings":service.read_bindings(),"trustedRead":service.trusted_read()}));
     request("snapshotBegin",json!({"snapshot":snapshot,"files":files.iter().map(|(file,_)|file).collect::<Vec<_>>()}));
     for (file,text) in &files { for (index,chunk) in text.as_bytes().chunks(crate::protocol::CHUNK_BYTES).enumerate() {
         request("snapshotChunk",json!({"snapshot":id,"fileId":file["fileId"],"index":index,"data":base64::engine::general_purpose::STANDARD.encode(chunk)}));
@@ -751,7 +847,7 @@ fn native_captured_rebuild(service: &ProjectService, id: &str, retained: bool, e
         if event["event"]["scope"] == "internal" && value["kind"] == "prepared" {
             let validation = if retained { service.validate_retained_snapshot(id,&value["dependencyVersions"]) } else { service.validate_snapshot(id,&value["dependencyVersions"]) };
             context.request_id = opaque();
-            engine.request_timeout(&context,"authorizeApply",json!({"target":value["requestId"],"allowed":validation.is_ok(),"failure":validation.err()}),Some(Duration::from_secs(5))).unwrap();
+            engine.request_timeout(&context,"authorizeApply",json!({"target":value["requestId"],"authorization":value["authorization"],"allowed":validation.is_ok(),"failure":validation.err()}),Some(Duration::from_secs(5))).unwrap();
             break;
         }
     }

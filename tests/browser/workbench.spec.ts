@@ -1,8 +1,9 @@
 import { test, expect, type Page } from "@playwright/test";
+import { clickCommand, openCommandMenu } from "./commands";
 import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { unzipSync } from "fflate";
+import { unzipSync, zipSync } from "fflate";
 
 declare global {
   interface Window {
@@ -15,6 +16,14 @@ declare global {
     __releaseHeldExport?: () => void;
     __heldCompile: boolean;
     __releaseHeldCompilation?: () => void;
+    __locationPageRows: number;
+    __locationPageTotal: number;
+    __heldLocation: boolean;
+    __locationReplyReceived: boolean;
+    __releaseHeldLocation?: () => void;
+    __navigationFramesHeld: number;
+    __resumeNavigationFrames?: () => void;
+    __releaseNavigationFrames?: () => void;
   }
 }
 const fixture = {
@@ -142,7 +151,7 @@ test("folder MIDI assets survive compilation and ZIP export", async ({
       dir.split("/").at(-1)!,
     );
     const downloadEvent = page.waitForEvent("download");
-    await page.locator("#download").click();
+    await clickCommand(page, "#download");
     const download = await downloadEvent;
     const archivePath = await download.path();
     expect(archivePath).toBeTruthy();
@@ -163,7 +172,8 @@ test("static deployment: playback, rejected edits, source navigation, views, and
   await page.goto("./");
   await expect(page.locator("#build-state")).toHaveText("Accepted");
   const rendererWorkers = await countWorkers(page);
-  await expect(page.locator("#build-detail")).toContainText("1 tracks");
+  await expect(page.getByLabel("Inspect track").locator("option")).toHaveCount(1);
+  await expect(page.getByLabel("Inspect track").locator('option[value="lead"]')).toHaveCount(1);
   await page.locator("#play").click();
   await expect(page.locator("#clock")).not.toHaveText("0:00", {
     timeout: 8000,
@@ -174,11 +184,11 @@ test("static deployment: playback, rejected edits, source navigation, views, and
   await page.keyboard.press("Control+Home");
   await page.keyboard.type("bad_symbol();\n");
   await page.locator("#run").click();
-  await expect(page.locator("#build-state")).toHaveText("Needs attention");
-  await expect(page.locator("#diagnostic-list")).toContainText("bad_symbol");
+  await expect(page.locator("#build-state")).toHaveText("Build failed");
+  await expect(page.locator("#workflow-status")).toContainText("bad_symbol");
   await expect(page.locator("#play")).toHaveText("Ⅱ Pause");
   expect(await countWorkers(page)).toBe(rendererWorkers);
-  await page.locator("[data-diagnostic]").click();
+  await page.locator("[data-open-error]").first().click();
   await expect(page.locator("#source-path")).toHaveText("production.muz");
   // Undo and recompile without losing the accepted snapshot.
   await page.locator(".cm-content").click();
@@ -203,7 +213,6 @@ test("static deployment: playback, rejected edits, source navigation, views, and
   await expect(page.locator(".automation-lane").first()).toBeVisible();
   // All interface typography is proportional, including the editor gutters.
   for (const selector of [
-    ".brand",
     "#clock",
     ".file",
     ".view-tabs button",
@@ -218,10 +227,10 @@ test("static deployment: playback, rejected edits, source navigation, views, and
     ).not.toMatch(/mono|Consolas|Courier/i);
   }
   const downloadEvent = page.waitForEvent("download");
-  await page.locator("#download").click();
+  await clickCommand(page, "#download");
   const download = await downloadEvent;
   const archivePath = await download.path();
-  await page.locator("#new-project").click();
+  await clickCommand(page, "#new-project");
   await expect(page.locator("#workflow-dialog")).toContainText("Leave this project?");
   await page.locator("#workflow-dialog").getByRole("button", { name: "Discard", exact: true }).click();
   await expect(page.locator("#project-title")).toHaveText("Untitled project");
@@ -230,7 +239,11 @@ test("static deployment: playback, rejected edits, source navigation, views, and
   await expect(page.locator("#build-state")).toHaveText("Accepted");
   await page.locator("#run").click();
   await expect(page.locator("#build-state")).toHaveText("Accepted");
-  await expect(page.locator("#build-detail")).toContainText("1 tracks");
+  await expect(page.getByLabel("Inspect track")).toBeEnabled();
+  await expect(page.getByLabel("Inspect track").locator("option")).toHaveCount(1);
+  await expect(page.getByLabel("Inspect track").locator('option[value="lead"]')).toHaveCount(1);
+  await expect(page.locator(".automation-lane")).toBeVisible();
+  await expect(page.locator("#workflow-status")).not.toContainText("Present accepted music · failed");
   expect(errors).toEqual([]);
 });
 
@@ -244,7 +257,7 @@ test("new project, local draft recovery, and Settings theme persistence", async 
   await page.locator("#settings-theme").selectOption("dark");
   await page.locator("#settings-close").click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
-  await page.locator("#new-project").click();
+  await clickCommand(page, "#new-project");
   await expect(page.locator("#project-title")).toHaveText("Untitled project");
   await expect(page.locator("#build-state")).toHaveText("Accepted");
   await expect(page.locator("#build-detail")).toContainText("1 tracks");
@@ -296,6 +309,24 @@ test("folder import retains relative modules and switches the entry file", async
 test("arrangement navigation stays usable at deep zoom and follows only when enabled", async ({
   page,
 }) => {
+  await page.addInitScript(() => {
+    window.noteRects = [];
+    const fill = CanvasRenderingContext2D.prototype.fillRect;
+    const rect = CanvasRenderingContext2D.prototype.rect;
+    CanvasRenderingContext2D.prototype.rect = function (x, y, width, height) {
+      if (this.canvas.closest("#arrangement") && y === 58 && x > 0 &&
+          x + width === this.canvas.clientWidth && y + height === this.canvas.clientHeight)
+        this.canvas.dataset.plotOrigin = String(x);
+      return rect.call(this, x, y, width, height);
+    };
+    CanvasRenderingContext2D.prototype.fillRect = function (x, y, width, height) {
+      if (this.canvas.closest("#arrangement")) {
+        if (x === 0 && y === 0 && height > 58) window.noteRects = [];
+        if (height === 2.5) window.noteRects.push({ x, y, width });
+      }
+      return fill.call(this, x, y, width, height);
+    };
+  });
   await page.goto("./");
   await expect(page.locator("#build-state")).toHaveText("Accepted");
   const viewport = page.locator("#arrangement");
@@ -304,6 +335,7 @@ test("arrangement navigation stays usable at deep zoom and follows only when ena
   await page.locator("#zoom").focus();
   await page.keyboard.press("End");
   await expect(page.locator("#zoom-value")).toHaveText("512×");
+  await expect(viewport).toHaveAttribute("data-inspection-state", "ready");
   const bounds = await viewport.boundingBox();
   const geometry = await viewport.evaluate((el) => ({
     width: el.clientWidth,
@@ -320,7 +352,10 @@ test("arrangement navigation stays usable at deep zoom and follows only when ena
   const anchorX = 260;
   const fraction = () =>
     viewport.evaluate(
-      (el, x) => (el.scrollLeft + x - 130) / (el.scrollWidth - 142),
+      (el, x) => {
+        const origin = Number(el.querySelector("canvas")!.dataset.plotOrigin);
+        return (el.scrollLeft + x - origin) / (el.querySelector<HTMLElement>(".arrangement-surface")!.offsetWidth - origin - 12);
+      },
       anchorX,
     );
   const before = await fraction();
@@ -358,18 +393,20 @@ test("arrangement navigation stays usable at deep zoom and follows only when ena
   await expect(page.locator("#zoom-value")).toHaveText("1×");
   expect(await viewport.evaluate((el) => el.scrollLeft)).toBe(0);
   // Panning didn't turn a drag into a seek; ordinary ruler clicks still seek.
+  await expect(viewport).toHaveAttribute("data-inspection-state", "ready");
+  await expect(page.getByRole("button", { name: "Mute lead", exact: true })).toBeEnabled();
   const fitted = await viewport.evaluate((el) => el.clientWidth);
-  await canvas.click({ position: { x: 130 + (fitted - 142) * 0.51, y: 43 } });
+  await canvas.click({ position: { x: 154 + (fitted - 166) * 0.51, y: 43 } });
   await expect(page.locator("#clock")).toHaveText("0:04");
   await page.locator("#zoom").fill("4");
   await page.locator("#zoom").dispatchEvent("input");
   await viewport.evaluate((el) => {
     el.scrollLeft = 0;
   });
-  await expect(viewport).toHaveAttribute("data-inspection-state", "detail");
-  await canvas.click({
-    position: { x: 135, y: 70 },
-  });
+  await expect(viewport).toHaveAttribute("data-inspection-state", "ready");
+  const note = await page.evaluate(() => [...window.noteRects].sort((left, right) => left.x - right.x)[0]);
+  expect(note).toBeTruthy();
+  await canvas.click({ position: { x: Math.max(154, note.x) + 2, y: note.y + 1.25 } });
   await expect(page.locator("#selection-label")).toContainText("C4");
 });
 
@@ -466,8 +503,12 @@ test("nested libraries, entry selection, inspector visibility, and analysis sour
   );
   await page.locator("#run").click();
   await expect(page.locator("#build-state")).toHaveText("Accepted");
+  await expect(page.locator("#inspector")).toBeHidden();
+  await page.locator("#toggle-inspector").click();
+  await expect(page.locator("#inspector")).toBeVisible();
   await page.locator("#toggle-inspector").click();
   await expect(page.locator("#inspector")).toBeHidden();
+  await page.locator("#analysis-disclosure > summary").click();
   await page.locator("#analysis-source").selectOption("lead");
   await expect(page.locator("#analysis-detail")).toHaveText(
     "Track output · before buses",
@@ -528,9 +569,10 @@ test("mounted folder saves source and new files, and refuses external changes", 
   });
   await page.goto("./");
   await expect(page.locator("#build-state")).toHaveText("Accepted");
-  await page.locator("#mount-folder").click();
+  await clickCommand(page, "#mount-folder");
   await expect(page.locator("#project-title")).toHaveText("Mounted project");
   await expect(page.locator("#workspace-mode")).toHaveText("Folder connected");
+  await openCommandMenu(page, "#reload-folder");
   await expect(page.locator("#reload-folder")).toBeVisible();
   await page.locator(".cm-content").click();
   await page.keyboard.press("Control+End");
@@ -595,10 +637,8 @@ test("mounted folder saves source and new files, and refuses external changes", 
   await page.evaluate(() => {
     (window as any).failFolderRead = true;
   });
-  await page.locator("#reload-folder").click();
-  await expect(page.locator("#diagnostic-list")).toContainText(
-    "Folder temporarily unavailable",
-  );
+  await clickCommand(page, "#reload-folder");
+  await expect(page.locator("#workflow-status")).toContainText("Folder temporarily unavailable");
   await expect(page.locator(".cm-content")).toContainText("local edit");
   await expect(page.locator("#workspace-mode")).toHaveAttribute("data-mode", "connected");
   await page.evaluate(async () => {
@@ -622,7 +662,7 @@ test("mounted folder saves source and new files, and refuses external changes", 
       await writer.close();
     }
   });
-  await page.locator("#reload-folder").click();
+  await clickCommand(page, "#reload-folder");
   await expect(page.locator("#workflow-dialog")).toContainText("External change: song.muz");
   await expect(page.locator("#conflict-merge")).toHaveValue(/local edit/);
   await page.locator("#workflow-dialog").getByRole("button", { name: "Use disk", exact: true }).click();
@@ -658,6 +698,7 @@ test("mounted folder saves source and new files, and refuses external changes", 
   await expect(page.locator("#workspace-mode")).toHaveText("Browser copy");
   await expect(page.locator("#reload-folder")).toBeHidden();
   await expect(page.locator("#save-folder")).toBeHidden();
+  await openCommandMenu(page, "#download");
   await expect(page.locator("#download")).toBeVisible();
 });
 
@@ -695,7 +736,7 @@ test("mounted folder reload preserves the selected entry and active playback", a
   });
   await page.goto("./");
   await expect(page.locator("#build-state")).toHaveText("Accepted");
-  await page.locator("#mount-folder").click();
+  await clickCommand(page, "#mount-folder");
   await expect(page.locator("#project-title")).toHaveText("Audition project");
   await expect(page.locator("#build-state")).toHaveText("Accepted");
   await page.locator(".range-menu > summary").click();
@@ -748,7 +789,7 @@ test("mounted folder reload preserves the selected entry and active playback", a
   });
   const beforeReload = await seconds();
   try {
-    await page.locator("#reload-folder").click();
+    await clickCommand(page, "#reload-folder");
     await expect(page.locator("#build-state")).toHaveText("Compiling");
     await expect.poll(() => page.evaluate(() => window.__heldCompile)).toBe(true);
     await expect(page.locator("#play")).toHaveText("Ⅱ Pause");
@@ -784,9 +825,10 @@ test("mounted folder reload preserves the selected entry and active playback", a
     await writer.write("bad_symbol();");
     await writer.close();
   });
-  await page.locator("#reload-folder").click();
-  await expect(page.locator("#build-state")).toHaveText("Needs attention");
-  await expect(page.locator("#diagnostic-list")).toContainText("bad_symbol");
+  await clickCommand(page, "#reload-folder");
+  await expect(page.locator("#reload-folder")).toBeHidden();
+  await expect(page.locator("#build-state")).toHaveText("Build failed");
+  await expect(page.locator("#workflow-status")).toContainText("bad_symbol");
   await expect(
     page.locator("#analysis-source option[value='audition_updated']"),
   ).toHaveCount(1);
@@ -806,7 +848,7 @@ test("mounted folder reload preserves the selected entry and active playback", a
     );
     await writer.close();
   });
-  await page.locator("#reload-folder").click();
+  await clickCommand(page, "#reload-folder");
   await expect(
     page.locator("#analysis-source option[value='recovered']"),
   ).toHaveCount(1);
@@ -819,20 +861,20 @@ test("mounted folder reload preserves the selected entry and active playback", a
     const root = await navigator.storage.getDirectory();
     await root.removeEntry("song.muz");
   });
-  await page.locator("#reload-folder").click();
+  await clickCommand(page, "#reload-folder");
   await expect(page.locator("#build-state")).toHaveText("Accepted");
   await expect(page.locator('[data-tab="project:song.muz"]')).toHaveCount(0);
   await expect(page.locator('[data-tab="project:audition.muz"]')).toHaveAttribute("aria-selected", "true");
   await expect(page.locator(".cm-content")).toContainText('track("recovered"');
   await page.locator('[data-close-tab="project:audition.muz"]').click();
   await expect(page.locator("#source-empty")).toBeVisible();
-  await page.locator("#reload-folder").click();
+  await clickCommand(page, "#reload-folder");
   await expect(page.locator("#build-state")).toHaveText("Accepted");
   await expect(page.locator("[data-tab]")).toHaveCount(0);
   await expect(page.locator("#source-empty")).toBeVisible();
 });
 
-test("Entrypoints excludes helper modules and refreshes after edits", async ({
+test("Entrypoints explains non-song helpers and refreshes classification after edits", async ({
   page,
 }) => {
   await page.addInitScript(
@@ -854,7 +896,7 @@ test("Entrypoints excludes helper modules and refreshes after edits", async ({
   ).toHaveCount(1);
   await expect(
     page.locator('#entry-select option[value="helper.muz"]'),
-  ).toHaveCount(0);
+  ).toHaveJSProperty("disabled", true);
   await page.locator('[data-file="helper.muz"]').click();
   await expect(page.locator("#set-entry")).toBeDisabled();
   await page.locator(".cm-content").click();
@@ -869,7 +911,7 @@ test("Entrypoints excludes helper modules and refreshes after edits", async ({
   await page.keyboard.insertText("fn double(x) = x * 2;");
   await expect(
     page.locator('#entry-select option[value="helper.muz"]'),
-  ).toHaveCount(0);
+  ).toHaveJSProperty("disabled", true);
   await expect(page.locator("#set-entry")).toBeDisabled();
 });
 
@@ -918,7 +960,7 @@ test("closing views uses ordered neighbors and retains canonical edits and undo"
   await page.locator('[data-close-tab="project:production.muz"]').click();
   await expect(page.locator('[data-tab="project:song.muz"]')).toHaveAttribute("aria-selected", "true");
   const downloadEvent = page.waitForEvent("download");
-  await page.locator("#download").click();
+  await clickCommand(page, "#download");
   const archive = unzipSync(new Uint8Array(await readFile((await (await downloadEvent).path())!)));
   expect(new TextDecoder().decode(archive["production.muz"])).toContain("// retained closed edit");
   await page.locator('[data-tab="project:README.md"]').click();
@@ -940,6 +982,7 @@ test("last close leaves transport, nondefault entry, loop and audition alive wit
   await expect(page.locator("#entry-label")).toHaveText("Entry: production.muz");
   await page.locator("#loop").click();
   await page.getByRole("button", { name: "Mute lead", exact: true }).click();
+  await page.locator("#analysis-disclosure > summary").click();
   await page.locator("#analysis-source").selectOption("lead");
   await page.locator("#play").click();
   await expect(page.locator("#clock")).not.toHaveText("0:00", { timeout: 8000 });
@@ -1063,7 +1106,7 @@ test("editor scroll survives source/document switches and cancelled replacement 
   await page.locator('[data-file="production.muz"]').click();
   await expect.poll(() => page.locator(".cm-scroller").evaluate(element => element.scrollTop)).toBeCloseTo(scroll, 0);
   const tabs = await page.locator("[data-tab]").evaluateAll(elements => elements.map(element => element.getAttribute("data-tab")));
-  await page.locator("#new-project").click();
+  await clickCommand(page, "#new-project");
   await expect(page.locator("#workflow-dialog")).toBeVisible();
   await page.locator("#workflow-dialog").getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(page.locator("#project-title")).toHaveText("Browser project");
@@ -1092,7 +1135,7 @@ test("a real asynchronous Format reply cannot edit the next tab or a detached so
   await page.locator('[data-close-tab="project:song.muz"]').click();
   await expect(page.locator("#source-empty")).toBeVisible();
   const downloadEvent = page.waitForEvent("download");
-  await page.locator("#download").click();
+  await clickCommand(page, "#download");
   const archive = unzipSync(new Uint8Array(await readFile((await (await downloadEvent).path())!)));
   expect(Object.keys(archive).sort()).toEqual(["muzpad.json", "production.muz", "song.muz"]);
   expect(new TextDecoder().decode(archive["song.muz"])).toBe(fixture.files["song.muz"]);
@@ -1161,7 +1204,7 @@ async function mountSafetyFolder(page: Page) {
   });
   await page.goto("./");
   await expect(page.locator("#build-state")).toHaveText("Accepted");
-  await page.locator("#mount-folder").click();
+  await clickCommand(page, "#mount-folder");
   await expect(page.locator("#project-title")).toHaveText("Safety folder");
   await expect(page.locator("#build-state")).toHaveText("Accepted");
 }
@@ -1182,7 +1225,7 @@ test("a conflict in B cannot overwrite an equal-version edit raced against A's d
     }
     window.__holdNextSafetyRead = true;
   });
-  await page.locator("#reload-folder").click();
+  await clickCommand(page, "#reload-folder");
   await expect.poll(() => page.evaluate(() => window.__safetyReadBlocked)).toBe(true);
   await page.locator(".cm-content").press("ControlOrMeta+End");
   await page.keyboard.insertText("// raced local A\n");
@@ -1206,7 +1249,7 @@ test("a conflict in B cannot overwrite an equal-version edit raced against A's d
   await page.locator("#run").click();
   await expect(page.locator("#build-state")).toHaveText("Accepted");
   const downloadEvent = page.waitForEvent("download");
-  await page.locator("#download").click();
+  await clickCommand(page, "#download");
   const archive = unzipSync(await readFile((await (await downloadEvent).path())!));
   expect(new TextDecoder().decode(archive["a.muz"])).toContain("raced local A");
   expect(new TextDecoder().decode(archive["b.muz"])).toBe("// disk B\n");
@@ -1220,7 +1263,8 @@ test("recreating a deleted source reuses its canonical tombstone for save rebuil
   await mountSafetyFolder(page);
   await page.locator('[data-file="a.muz"]').click();
   await page.evaluate(async () => (await navigator.storage.getDirectory()).removeEntry("a.muz"));
-  await page.locator("#reload-folder").click();
+  await clickCommand(page, "#reload-folder");
+  await expect(page.locator("#reload-folder")).toBeHidden();
   await expect(page.locator('[data-file="a.muz"]')).toHaveCount(0);
   await expect(page.locator("#build-state")).toHaveText("Accepted");
   await page.locator("#add-file").click();
@@ -1235,7 +1279,7 @@ test("recreating a deleted source reuses its canonical tombstone for save rebuil
   await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem("muzpad-draft-v1")!).files["a.muz"])).toContain("recreated canonical A");
   expect(await page.evaluate(async () => (await (await (await navigator.storage.getDirectory()).getFileHandle("a.muz")).getFile()).text())).toContain("recreated canonical A");
   const downloadEvent = page.waitForEvent("download");
-  await page.locator("#download").click();
+  await clickCommand(page, "#download");
   const archive = unzipSync(await readFile((await (await downloadEvent).path())!));
   expect(new TextDecoder().decode(archive["a.muz"])).toContain("recreated canonical A");
   expect(Object.keys(archive).filter(path => path === "a.muz")).toHaveLength(1);
@@ -1274,7 +1318,7 @@ test("a clean browser project offers explicit active-export cancellation before 
   await mountSafetyFolder(page);
   let downloads = 0;
   page.on("download", () => { downloads++; });
-  await page.locator("#export-media").click();
+  await clickCommand(page, "#export-media");
   await page.locator("#export-master").click();
   await expect.poll(() => page.evaluate(() => window.__exportWorkerBlocked)).toBe(true);
   // Exercise the production replacement action while the export modal is open,
@@ -1316,10 +1360,265 @@ test("source creation accepts Unicode and spaces without accepting project path 
   await expect(page.locator("#source-path")).toHaveText(path);
   expect(await projectPaths()).toContain(path);
   const downloading = page.waitForEvent("download");
-  await page.locator("#download").click();
+  await clickCommand(page, "#download");
   const download = await downloading;
   const archivePath = await download.path();
   const archive = unzipSync(new Uint8Array(await readFile(archivePath!)));
   expect(Object.hasOwn(archive, path)).toBe(true);
   expect(archive[path].byteLength).toBeGreaterThan(0);
 });
+
+test("related source lookup works beyond the bounded initial location page", async ({ page }) => {
+  const tracks = Array.from({ length: 101 }, (_, i) => `track("track_${String(i).padStart(3, "0")}", phrase("C4:q"), synth("init"))`);
+  await page.addInitScript((base) => {
+    localStorage.setItem("muzpad-draft-v1", JSON.stringify(base));
+    const postMessage = Worker.prototype.postMessage;
+    Worker.prototype.postMessage = function (...args: unknown[]) {
+      const envelope = args[0];
+      if (envelope && typeof envelope === "object" && "message" in envelope && "id" in envelope) {
+        const message = envelope.message;
+        if (message && typeof message === "object" && "command" in message && "view" in message && message.command === "inspect" && message.view === "locations") {
+          const worker = this;
+          const onReply = (event: MessageEvent) => {
+            if (event.data?.id !== envelope.id) return;
+            worker.removeEventListener("message", onReply);
+            window.__locationPageRows = event.data.value.rows.length;
+            window.__locationPageTotal = event.data.value.total;
+          };
+          worker.addEventListener("message", onReply);
+        }
+      }
+      return Reflect.apply(postMessage, this, args);
+    };
+  }, {
+    ...fixture,
+    files: {
+      "song.muz": `use "notes/late.muz" as late; song({tracks:[${tracks.join(",")}, late.last],tail:0})`,
+      "notes/late.muz": 'let last = track("zz_late", phrase("G4:q"), synth("init"));',
+    },
+  });
+  await page.goto("/studio/");
+  await expect(page.locator("#build-state")).toHaveText("Accepted");
+  await expect.poll(() => page.evaluate(() => window.__locationPageRows)).toBe(100);
+  await expect.poll(() => page.evaluate(() => window.__locationPageTotal)).toBeGreaterThan(100);
+  await clickCommand(page, "#pane-inspector");
+  await page.locator("#track-select").selectOption("zz_late");
+  await expect(page.locator("#jump-source")).toBeEnabled();
+  await page.locator("#jump-source").click();
+  await expect(page.locator("#source-path")).toHaveText("notes/late.muz");
+  await expect(page.locator(".cm-content")).toContainText('track("zz_late"');
+});
+
+test("a delayed keyed location cannot replace a newer explicit file navigation", async ({ page }) => {
+  await page.goto("/studio/");
+  await expect(page.locator("#build-state")).toHaveText("Accepted");
+  await page.locator('[data-view="routing"]').click();
+  await expect(page.getByRole("button", { name: "Open related source for device.lead.instrument", exact: true })).toBeVisible();
+  await page.evaluate(() => {
+    const postMessage = Worker.prototype.postMessage;
+    let hold = true;
+    Worker.prototype.postMessage = function (...args: unknown[]) {
+      const envelope = args[0];
+      if (hold && envelope && typeof envelope === "object" && "message" in envelope && "id" in envelope) {
+        const message = envelope.message;
+        if (message && typeof message === "object" && "command" in message && message.command === "location") {
+          hold = false;
+          window.__heldLocation = true;
+          const worker = this;
+          const onReply = (event: MessageEvent) => {
+            if (event.data?.id !== envelope.id) return;
+            worker.removeEventListener("message", onReply);
+            window.__locationReplyReceived = true;
+          };
+          worker.addEventListener("message", onReply);
+          window.__releaseHeldLocation = () => { Reflect.apply(postMessage, worker, args); };
+          return;
+        }
+      }
+      return Reflect.apply(postMessage, this, args);
+    };
+  });
+  await page.getByRole("button", { name: "Open related source for device.lead.instrument", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => window.__heldLocation)).toBe(true);
+  try {
+    await page.locator('[data-file="song.muz"]').click();
+    await expect(page.locator("#source-path")).toHaveText("song.muz");
+  } finally {
+    await page.evaluate(() => window.__releaseHeldLocation?.());
+  }
+  await expect.poll(() => page.evaluate(() => window.__locationReplyReceived)).toBe(true);
+  await page.evaluate(() => { const { promise, resolve } = Promise.withResolvers<number>(); requestAnimationFrame(resolve); return promise; });
+  await expect(page.locator("#source-path")).toHaveText("song.muz");
+  await expect(page.locator(".cm-content")).toHaveText(fixture.files["song.muz"]);
+});
+
+for (const entry of ["helper.muz", "missing.muz"]) {
+  test(`explicit declared ${entry} remains selected with its classification reason`, async ({ page }) => {
+    await page.addInitScript((base) => {
+      localStorage.setItem("muzpad-draft-v1", JSON.stringify(base));
+    }, {
+      ...fixture, entry, entries: ["song.muz", "helper.muz", "missing.muz"],
+      files: { ...fixture.files, "helper.muz": "fn double(x) = x * 2;" },
+    });
+    await page.goto("/studio/");
+    await expect(page.locator("#entry-select")).toHaveValue(entry);
+    await expect(page.locator("#entry-classification")).toContainText(`Declared and selected: ${entry}`);
+    await expect(page.locator("#entry-classification")).toContainText(entry === "helper.muz" ? "non-song" : "Source file is missing");
+    await expect(page.locator('#entry-select option[value="song.muz"]')).toHaveCount(1);
+    await expect(page.locator('#entry-select option[value="helper.muz"]')).toHaveCount(1);
+    await expect(page.locator('#entry-select option[value="missing.muz"]')).toHaveCount(1);
+    await expect(page.locator("#entry-select")).toHaveValue(entry);
+    await expect(page.locator("#play")).toBeDisabled();
+  });
+}
+
+test("an edited helper remains selectable after cancelling its replacement classification", async ({ page }) => {
+  await page.addInitScript(base => localStorage.setItem("muzpad-draft-v1", JSON.stringify(base)), {
+    ...fixture, entries: ["song.muz", "helper.muz"],
+    files: { ...fixture.files, "helper.muz": "fn double(x) = x * 2;" },
+  });
+  await page.goto("./");
+  await expect(page.locator("#build-state")).toHaveText("Accepted");
+  const helper = page.locator('#entry-select option[value="helper.muz"]');
+  await expect(helper).toContainText("non-song");
+  await expect(helper).toHaveJSProperty("disabled", true);
+  await page.locator('[data-file="helper.muz"]').click();
+  await page.locator(".cm-content").focus();
+  await page.keyboard.press("ControlOrMeta+a");
+  await page.keyboard.insertText('song({tracks:[track("edited",phrase("C4:q E4:q"),synth("init"))],tail:0})');
+  await page.locator("#cancel-entry-scan").click();
+  await expect(helper).toHaveJSProperty("disabled", false);
+  await expect(helper).toContainText("stale");
+  await expect(page.locator("#set-entry")).toBeEnabled();
+  await page.locator("#set-entry").click();
+  await expect(page.locator("#entry-select")).toHaveValue("helper.muz");
+  await page.locator("#run").click();
+  await expect(page.locator("#build-state")).toHaveText("Accepted");
+  await expect(page.locator('#track-select option[value="edited"]')).toHaveCount(1);
+});
+
+test("bad-extension and missing declarations do not poison valid source alternatives", async ({ page }) => {
+  await page.addInitScript(base => localStorage.setItem("muzpad-draft-v1", JSON.stringify(base)), {
+    ...fixture, entry: "README.md", entries: ["README.md", "missing.muz", "song.muz", "helper.muz"],
+    files: { ...fixture.files, "README.md": "# Project notes", "helper.muz": "fn double(x) = x * 2;" },
+  });
+  await page.goto("./");
+  await expect(page.locator("#entry-select")).toHaveValue("README.md");
+  await expect(page.locator('#entry-select option[value="README.md"]')).toContainText("not a .muz source");
+  await expect(page.locator('#entry-select option[value="missing.muz"]')).toContainText("missing");
+  await expect(page.locator('#entry-select option[value="helper.muz"]')).toContainText("non-song");
+  await expect(page.locator('#entry-select option[value="song.muz"]')).toContainText("song");
+  await expect(page.locator('#entry-select option[value="song.muz"]')).toHaveJSProperty("disabled", false);
+  await expect(page.locator("#entry-classification")).toContainText("not a .muz source entry");
+  const failedBuild = page.locator(".action-status").filter({ hasText: /Rebuild · (failed|rejected)/ });
+  await expect(failedBuild).toBeVisible();
+  const technical = JSON.parse((await failedBuild.locator("pre").textContent())!);
+  expect(technical.diagnostic).toBeTruthy();
+  await page.locator("#entry-select").selectOption("song.muz");
+  await page.locator("#run").click();
+  await expect(page.locator("#build-state")).toHaveText("Accepted");
+});
+
+test("ZIP declarations preserve missing, non-song and non-source reasons alongside an accepted song", async ({ page }) => {
+  await page.goto("./");
+  await expect(page.locator("#build-state")).toHaveText("Accepted");
+  const entries = ["missing.muz", "helper.muz", "README.md", "song.muz", "bad.muz"];
+  const files = {
+    ...fixture.files,
+    "helper.muz": "fn double(x) = x * 2;",
+    "README.md": "# Imported guide",
+    "bad.muz": 'use "missing-library.muz" as missing; missing.main',
+    "muzpad.json": JSON.stringify({ title: "Declared ZIP", entry: "song.muz", entries }),
+  };
+  await page.locator("#zip-input").setInputFiles({
+    name: "declared.zip", mimeType: "application/zip",
+    buffer: Buffer.from(zipSync(Object.fromEntries(Object.entries(files).map(([path, text]) => [path, Buffer.from(text)])))),
+  });
+  await expect(page.locator("#project-title")).toHaveText("Declared ZIP");
+  await expect(page.locator("#build-state")).toHaveText("Accepted");
+  await expect(page.locator('#entry-select option[value="README.md"]')).toContainText("not a .muz source");
+  await expect(page.locator('#entry-select option[value="missing.muz"]')).toContainText("missing");
+  await expect(page.locator('#entry-select option[value="helper.muz"]')).toContainText("non-song");
+  await expect(page.locator('#entry-select option[value="bad.muz"]')).toContainText("unresolved");
+  await expect(page.locator('#entry-select option[value="song.muz"]')).toBeEnabled();
+  const downloadEvent = page.waitForEvent("download");
+  await clickCommand(page, "#download");
+  const archive = unzipSync(await readFile((await (await downloadEvent).path())!));
+  expect(JSON.parse(new TextDecoder().decode(archive["muzpad.json"])).entries).toEqual(entries);
+});
+
+test("cancelling ZIP replacement settles its original request without hiding a retained MIDI receipt", async ({ page }) => {
+  await page.goto("./");
+  await expect(page.locator("#build-state")).toHaveText("Accepted");
+  await clickCommand(page, "#export-media");
+  await page.locator("#export-format").selectOption("midi");
+  const downloaded = page.waitForEvent("download");
+  await page.locator("#export-submit").click();
+  expect((await readFile((await (await downloaded).path())!)).toString("ascii", 0, 4)).toBe("MThd");
+  await page.locator("#export-close").click();
+  const exportReceipt = page.locator('.action-status[data-outcome="applied"]').filter({ hasText: /Export/ }).first();
+  await expect(exportReceipt).toBeVisible();
+  const exportRequest = await exportReceipt.getAttribute("data-action-request");
+  await page.locator(".cm-content").focus();
+  await page.keyboard.press("Control+End");
+  await page.keyboard.insertText("\n// retained ZIP cancellation edit");
+  await page.locator("#zip-input").setInputFiles({
+    name: "replacement.zip", mimeType: "application/zip",
+    buffer: Buffer.from(zipSync({ "song.muz": Buffer.from('song({tracks:[],tail:0})') })),
+  });
+  await expect(page.locator("#workflow-dialog")).toContainText("Leave this project?");
+  const importer = page.locator('.action-status').filter({ hasText: "Import project ZIP" }).first();
+  await expect(importer).toHaveAttribute("data-outcome", "pending");
+  const request = await importer.getAttribute("data-action-request");
+  await page.locator("#workflow-dialog").getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(page.locator(`.action-status[data-action-request="${request}"]`)).toHaveAttribute("data-outcome", "cancelled");
+  await expect(page.locator("#workflow-status")).not.toContainText("Reading archive data…");
+  await expect(page.locator(`.action-status[data-action-request="${exportRequest}"]`)).toBeVisible();
+  await expect(page.locator("#project-title")).toHaveText(fixture.title);
+  await expect(page.locator(".cm-content")).toContainText("retained ZIP cancellation edit");
+  await expect(page.locator("#build-state")).toHaveText("Accepted");
+});
+
+test("a delayed Markdown anchor cannot override a later intent for the same document", async ({ page }) => {
+  await page.addInitScript(base => localStorage.setItem("muzpad-draft-v1", JSON.stringify(base)), {
+    ...fixture,
+    files: { ...fixture.files, "README.md": `[Go to bottom](README.md#bottom)\n\n${"# Middle\n\nContent.\n\n".repeat(80)}# Bottom\n\nEnd.` },
+  });
+  await page.goto("./");
+  await expect(page.locator("#build-state")).toHaveText("Accepted");
+  await page.locator('[data-kind="project"][data-file="README.md"]').click();
+  await expect(page.locator("#document")).toBeVisible();
+  await page.evaluate(() => {
+    const nativeFrame = window.requestAnimationFrame.bind(window);
+    const nativeCancel = window.cancelAnimationFrame.bind(window);
+    const held = new Map<number, FrameRequestCallback>();
+    let paused = true, nextId = -1;
+    window.__navigationFramesHeld = 0;
+    window.requestAnimationFrame = callback => {
+      if (!paused) return nativeFrame(callback);
+      const id = nextId--;
+      held.set(id, callback); window.__navigationFramesHeld++;
+      return id;
+    };
+    window.cancelAnimationFrame = id => { if (id < 0) held.delete(id); else nativeCancel(id); };
+    window.__resumeNavigationFrames = () => { paused = false; };
+    window.__releaseNavigationFrames = () => {
+      paused = false; window.requestAnimationFrame = nativeFrame; window.cancelAnimationFrame = nativeCancel;
+      for (const callback of held.values()) nativeFrame(callback);
+    };
+    document.querySelector<HTMLAnchorElement>('#document a')!.click();
+  });
+  await expect.poll(() => page.evaluate(() => window.__navigationFramesHeld)).toBeGreaterThan(0);
+  try {
+    await page.evaluate(() => window.__resumeNavigationFrames?.());
+    await page.locator('[data-tab="project:README.md"]').click();
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => resolve())));
+    await expect.poll(() => page.locator("#document").evaluate(node => node.scrollTop)).toBeLessThan(200);
+  } finally {
+    await page.evaluate(() => window.__releaseNavigationFrames?.());
+  }
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => resolve())));
+  await expect(page.locator("#source-path")).toHaveText("README.md");
+  await expect.poll(() => page.locator("#document").evaluate(node => node.scrollTop)).toBeLessThan(200);
+});
+

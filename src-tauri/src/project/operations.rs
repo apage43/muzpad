@@ -126,42 +126,21 @@ impl ProjectService {
     }
     pub(super) fn capture_sources(&mut self, capture: WorkingCapture) -> Result<Value,Failure> {
         self.acknowledge(&capture)?;
-        let mut grants = io::boot_grants(&self.resource_dir,&self.event)?;
-        grants.extend(self.grants.drain(..).filter(|grant| grant.id.starts_with("external:")));
-        self.grants = grants;
+        self.grants = io::boot_grants(&self.resource_dir,&self.event)?;
         let state = self.state.clone(); let mut guard = state.lock(); let workspace = guard.as_mut().ok_or_else(|| failure("stale_request", "No open project"))?;
         if rescan(workspace)? { let snapshot = workspace.snapshot(); drop(guard); self.emit_changed(snapshot,"disk"); return Err(failure("source_conflict", "Disk changed during source capture; merge and recapture")); }
         if !workspace.conflicts().is_empty() { return Err(failure("source_conflict", "Resolve source conflicts before building")); }
-        if !workspace.files.values().any(|f| f.path == capture.entry && f.text.is_some()) { return Err(failure("missing_module", "Selected entry is absent from the working sources")); }
         let mut files = Vec::new(); let mut baselines = Vec::new(); let mut bytes = 0usize;
         for file in workspace.files.values() {
             baselines.push((project_grant(&workspace.project),file.path.clone(),file.disk_version.clone()));
             if let Some(text) = &file.text { bytes += text.len(); files.push((json!({"fileId":file.id,"path":file.path,"bufferVersion":file.version,"diskVersion":file.disk_version,"bytes":text.len()}),text.clone())); }
         }
         baselines.push((project_grant(&workspace.project),SETTINGS.into(),workspace.settings_version.clone()));
-        let mut library_paths = BTreeSet::new();
-        for grant in &self.grants {
-            if grant.kind == "library" {
-                for entry in grant.root.list_sources(MAX_FILES)? {
-                    if text_kind(&entry.path) != Some("source") { continue; }
-                    let absolute = grant.root.path().join(&entry.path).to_str().ok_or_else(|| failure("denied_path", "Library path is not UTF-8"))?.to_owned();
-                    if !library_paths.insert(absolute.clone()) { continue; }
-                    let file = grant.root.read(&entry.path,SOURCE_DOCUMENT_BYTES)?.ok_or_else(|| failure("source_conflict", "Library source disappeared during capture"))?;
-                    bytes = bytes.checked_add(file.bytes.len()).ok_or_else(|| failure("too_large", "Source snapshot overflow"))?;
-                    if bytes > SOURCE_SNAPSHOT_BYTES || files.len() >= MAX_FILES { return Err(failure("too_large", "Project plus imported library source capture exceeds the host budget")); }
-                    let text = String::from_utf8(file.bytes).map_err(|_| failure("invalid_source", "Library source is not UTF-8"))?;
-                    files.push((json!({"fileId":stable_file_id(&grant.id,&entry.path),"path":absolute,"bufferVersion":0,"diskVersion":file.version,"bytes":text.len()}),text));
-                    baselines.push((grant.id.clone(),entry.path.clone(),Some(file.version)));
-                }
-            } else if grant.kind == "config" {
-                if let Some(path) = &grant.exact { let version = grant.root.fingerprint(path,SOURCE_DOCUMENT_BYTES as u64)?; baselines.push((grant.id.clone(),path.clone(),version.clone())); self.watcher.observe(&workspace.epoch,grant.root.clone(),path.clone(),version)?; }
-            }
-        }
         if bytes > SOURCE_SNAPSHOT_BYTES { return Err(failure("too_large", "Source snapshot exceeds 64 MiB")); }
         // A second full baseline pass makes a changing multi-file capture fail closed.
         for (grant,path,expected) in &baselines { if self.dependency_version(workspace,grant,path)? != *expected { return Err(failure("source_conflict",format!("Dependency changed during capture: {path}"))); } }
         let id = opaque();
-        let descriptor = json!({"id":id,"project":workspace.project,"epoch":workspace.epoch,"sourceVersion":workspace.source_version,"entry":workspace.settings.entry,"diskGeneration":workspace.disk_generation.to_string(),"files":files.iter().map(|(f,_)|json!({"fileId":f["fileId"],"path":f["path"],"bufferVersion":f["bufferVersion"],"diskVersion":f["diskVersion"]})).collect::<Vec<_>>()});
+        let descriptor = json!({"id":id,"project":workspace.project,"epoch":workspace.epoch,"sourceVersion":workspace.source_version,"entry":workspace.settings.entry,"diskGeneration":workspace.disk_generation.to_string(),"deleted":workspace.files.values().filter(|file|file.text.is_none()).map(|file|file.path.clone()).collect::<Vec<_>>(),"files":files.iter().map(|(f,_)|json!({"fileId":f["fileId"],"path":f["path"],"bufferVersion":f["bufferVersion"],"diskVersion":f["diskVersion"]})).collect::<Vec<_>>()});
         let root = workspace.root.path().to_owned();
         drop(guard);
         while self.snapshots.len() >= 4 || self.snapshots.values().map(|s| s.bytes).sum::<usize>() + bytes > SOURCE_SNAPSHOT_BYTES * 4 {
@@ -199,22 +178,25 @@ impl ProjectService {
             let id = workspace.project.clone(); drop(guard);
             self.storage.remove_recovery(&id)?; self.offers.retain(|v| v["id"] != id); return Ok(());
         }
-        let record = recovery_record(workspace,&self.grants);
+        let record = recovery_record(workspace);
         drop(guard);
         self.storage.put_recovery(&record)?;
         let offer = offer(&record); self.offers.retain(|v| v["id"] != record["id"]); self.offers.push(offer.clone());
         (self.event)(json!({"kind":"recovery","offer":offer})); Ok(())
     }
-    pub(super) fn restore_recovery(&mut self, input: &Value) -> Result<Value,Failure> {
+    pub fn stage_recovery(&mut self, input: &Value) -> Result<bool,Failure> {
         let id = field(input,"id")?;
         match field(input,"action")? {
-            "discard" => { self.storage.remove_recovery(id)?; self.offers.retain(|v| v["id"] != id); self.reclaim_private_workspaces(); return Ok(Value::Null); },
+            "discard" => { self.storage.remove_recovery(id)?; self.offers.retain(|v| v["id"] != id); self.reclaim_private_workspaces(); return Ok(false); },
             "restore" => self.check_replacement()?, _ => return Err(failure("invalid_source", "Unknown recovery action")),
         }
+        if self.staged_project.is_some(){return Err(failure("queue_full","One project transition is already being staged"));}
         let record = self.storage.recovery_records()?.into_iter().find(|r| r["id"] == id).ok_or_else(|| failure("stale_request", "Recovery draft is no longer available"))?;
         let capture: WorkingCapture = decode(record["capture"].clone())?;
         let mut workspace = self.unsaved(capture.settings.clone(),Some(capture.project.clone()))?;
         workspace.gist = record["gist"].as_str().map(str::to_owned);
+        // Recovery trust is parent-owned storage, never imported metadata.
+        workspace.trusted = record["trusted"].as_bool().unwrap_or(false);
         if let Some(path) = record["root"].as_str() { if let Ok(root) = Root::open(Path::new(path)) { if record["rootIdentity"] == root.identity() { workspace.root = Arc::new(root); workspace.persisted = record["persisted"].as_bool().unwrap_or(!record["rootLabel"].is_null()); } } }
         if let Some(path) = record["assetOrigin"].as_str() { if let Ok(root) = Root::open(Path::new(path)) { workspace.asset_origin = Some(Arc::new(root)); } }
         workspace.source_version = capture.source_version; workspace.disk_generation = capture.expected_disk_generation.parse().map_err(|_|failure("invalid_source","Invalid recovery disk generation"))?;
@@ -224,20 +206,8 @@ impl ProjectService {
             workspace.files.insert(file.file_id.clone(),Buffer { id:file.file_id,path:file.path,text:file.text,version:file.buffer_version,base:base.and_then(|b|b["text"].as_str()).map(str::to_owned),disk_version:file.expected_disk_version,conflict:None,history:Vec::new() });
         }
         workspace.resources = record["resources"].as_array().cloned().unwrap_or_default();
-        let mut restored_grants = Vec::new();
-        if let Some(rows) = record["externalGrants"].as_array() {
-            if rows.len() > MAX_FILES { return Err(failure("resource_budget", "Too many recovery library grants")); }
-            for row in rows {
-                let id = field(row,"id")?; let path = field(row,"path")?;
-                if !id.starts_with("external:") { return Err(failure("denied_path", "Invalid recovery library grant identity")); }
-                match Root::open(Path::new(path)) {
-                    Ok(root) if row["identity"] == root.identity() => { let root = Arc::new(root); restored_grants.push(Grant { id:id.into(),kind:"library",path:root.path().to_owned(),root,exact:None }); },
-                    _ => { if let Some(resource) = workspace.resources.iter_mut().find(|r| r["id"] == id) { resource["availability"] = json!({"available":false,"reason":"Previously authorized library is missing or replaced; select it again"}); } }
-                }
-            }
-        }
         rescan(&mut workspace)?;
-        let result = self.install(workspace)?; self.grants.extend(restored_grants); self.persist_current()?; self.emit_changed(result.clone(),"recovery"); Ok(result)
+        self.staged_project=Some(StagedProject{workspace,recovery:true});Ok(true)
     }
     pub(super) fn archive(&mut self, capture: WorkingCapture) -> Result<Value,Failure> {
         self.acknowledge(&capture)?;
@@ -264,7 +234,7 @@ impl ProjectService {
         } else {
             let id = field(input,"id")?;
             let relative = workspace.files.get(id).map(|f|f.path.as_str()).or_else(||workspace.resources.iter().find(|r|r["id"]==id).and_then(|r|r["path"].as_str())).ok_or_else(||failure("denied_path","Unknown reveal identity"))?;
-            secure_fs::validate_path(relative)?;
+            crate::protocol::validate_path(relative)?;
             if workspace.root.fingerprint(relative,MAX_ASSETS)?.is_none() { return Err(failure("project_missing","File has not been saved")); }
             (workspace.root.path().join(relative),false)
         };
@@ -314,8 +284,8 @@ impl ProjectService {
 }
 fn safe_filename(title: &str) -> String { let name: String = title.chars().filter(|c|c.is_alphanumeric() || matches!(c,'-'|'_'|' ')).take(100).collect(); if name.trim().is_empty() { "project".into() } else { name } }
 
-pub(super) fn recovery_record(workspace: &Workspace, grants: &[Grant]) -> Value {
-    with_gist(json!({"version":1,"id":workspace.project,"project":workspace.project,"title":workspace.settings.title,"rootLabel":workspace.root_label(),"root":workspace.root.path(),"rootIdentity":workspace.root.identity(),"persisted":workspace.persisted,"updatedAt":storage::timestamp(),"updatedMillis":storage::now_millis(),"capture":workspace.working_capture(),"baseFiles":workspace.files.values().map(|f|json!({"fileId":f.id,"path":f.path,"text":f.base,"diskVersion":f.disk_version})).collect::<Vec<_>>(),"settingsBase":workspace.settings_base,"resources":workspace.resources,"assetOrigin":workspace.asset_origin.as_ref().map(|r|r.path()),"externalGrants":grants.iter().filter(|g|g.id.starts_with("external:")).map(|g|json!({"id":g.id,"path":g.root.path(),"identity":g.root.identity()})).collect::<Vec<_>>()}), workspace.gist.as_deref())
+pub(super) fn recovery_record(workspace: &Workspace) -> Value {
+    with_gist(json!({"version":1,"id":workspace.project,"project":workspace.project,"title":workspace.settings.title,"rootLabel":workspace.root_label(),"root":workspace.root.path(),"rootIdentity":workspace.root.identity(),"persisted":workspace.persisted,"trusted":workspace.trusted,"updatedAt":storage::timestamp(),"updatedMillis":storage::now_millis(),"capture":workspace.working_capture(),"baseFiles":workspace.files.values().map(|f|json!({"fileId":f.id,"path":f.path,"text":f.base,"diskVersion":f.disk_version})).collect::<Vec<_>>(),"settingsBase":workspace.settings_base,"resources":workspace.resources,"assetOrigin":workspace.asset_origin.as_ref().map(|r|r.path())}), workspace.gist.as_deref())
 }
 
 #[cfg(target_os="linux")]

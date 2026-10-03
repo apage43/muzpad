@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { clickCommand } from "./commands";
 import { readFile } from "node:fs/promises";
 const fixture = {
   id: "export-test",
@@ -16,7 +17,7 @@ test.beforeEach(async ({ page }) => {
   );
   await page.goto("./");
   await expect(page.locator("#build-state")).toHaveText("Accepted");
-  await page.locator("#export-media").click();
+  await clickCommand(page, "#export-media");
 });
 async function download(page: any, selector: string) {
   const pending = page.waitForEvent("download");
@@ -74,7 +75,13 @@ test("validation and cancellation allow retry", async ({ page }) => {
   // A failed worker can also be retried.
   await page.route("**/muz.wasm", (route) => route.abort());
   await page.locator("#export-master").click();
-  await expect(page.locator("#export-status")).toContainText("Export failed");
+  await expect(page.locator("#export-status")).toHaveText(/Export (failed|rejected):/);
+  await expect(page.locator("#build-state")).toHaveText("Accepted");
+  await page.locator("#export-diagnostics > summary").click();
+  await expect(page.locator("#export-technical")).toContainText("requestId");
+  await expect(page.locator("#export-technical")).toContainText("engineEpoch");
+  await expect(page.locator("#export-copy-diagnostics")).toBeEnabled();
+  await expect(page.locator("#export-usable")).toContainText("Working buffers remain usable");
   await page.unroute("**/muz.wasm");
   await page.locator("#export-format").selectOption("midi");
   await download(page, "#export-submit");
@@ -88,7 +95,7 @@ test("edited source exports the accepted revision until rebuilt", async ({
   await page.keyboard.press("Control+End");
   await page.keyboard.type(" ");
   await expect(page.locator("#revision")).toContainText("Edited");
-  await page.locator("#export-media").click();
+  await clickCommand(page, "#export-media");
   await expect(page.locator(".export-dialog")).toContainText(
     "Rebuild first to include your latest edits",
   );

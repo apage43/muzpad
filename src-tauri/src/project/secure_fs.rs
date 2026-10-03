@@ -10,12 +10,10 @@
 //! users; another process with this user's credentials is not a security boundary.
 //! Recovery only deletes private artifacts whose contents prove a completed save.
 
-use crate::protocol::Failure;
+use crate::protocol::{Failure,validate_path,MAX_COMPONENTS};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-const MAX_PATH_BYTES: usize = 4095;
-const MAX_COMPONENTS: usize = 128;
 
 pub struct Entry {
     pub path: String,
@@ -29,29 +27,6 @@ pub struct ReadFile {
     pub mode: u32,
 }
 
-pub fn validate_path(path: &str) -> Result<(), Failure> {
-    let drive_prefix = path.as_bytes().get(1) == Some(&b':')
-        && path.as_bytes().first().is_some_and(u8::is_ascii_alphabetic);
-    if path.is_empty()
-        || path.len() > MAX_PATH_BYTES
-        || path.starts_with('/')
-        || drive_prefix
-        || path.contains(['\0', '\\'])
-        || path.split('/').count() > MAX_COMPONENTS
-        || path.split('/').any(|part| {
-            part.is_empty()
-                || part == "."
-                || part == ".."
-                || part.len() > 255
-                || part.starts_with(".muzpad-")
-        })
-    {
-        let mut error = Failure::new("denied_path", "project", "Invalid project-relative path");
-        error.path = Some(path.to_owned());
-        return Err(error);
-    }
-    Ok(())
-}
 
 #[cfg(target_os = "linux")]
 mod linux {
@@ -358,28 +333,8 @@ mod linux {
         fn drop(&mut self) { unsafe { libc::closedir(self.0); } }
     }
 
+
     fn names(directory: &File, limit: usize) -> Result<Vec<OsString>, Failure> {
-        names_filtered(directory, limit, false)
-    }
-
-    fn source_candidate(directory: &File, name: &[u8], kind: u8) -> Result<bool, Failure> {
-        if name.starts_with(b".muzpad-")
-            || matches!(name, b"assets" | b".git" | b"node_modules" | b"target")
-        {
-            return Ok(false);
-        }
-        if kind == libc::DT_DIR { return Ok(true); }
-        if kind == libc::DT_REG { return Ok(name.ends_with(b".muz")); }
-        if kind != libc::DT_UNKNOWN { return Ok(false); }
-        // Some filesystems do not expose d_type. Only there is an O_PATH
-        // metadata lookup necessary to distinguish a directory from an asset.
-        let file = open_at(directory.as_raw_fd(), OsStr::from_bytes(name), libc::O_PATH, 0)
-            .map_err(io_failure)?;
-        let metadata = file.metadata()?;
-        Ok(metadata.is_dir() || (metadata.is_file() && name.ends_with(b".muz")))
-    }
-
-    fn names_filtered(directory: &File, limit: usize, sources_only: bool) -> Result<Vec<OsString>, Failure> {
         use std::os::fd::IntoRawFd;
         // openat(".") creates a fresh directory offset; dup would share readdir state.
         let descriptor = directory_at(directory, OsStr::new("."))?.into_raw_fd();
@@ -401,9 +356,6 @@ mod linux {
             }
             let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
             if name == b"." || name == b".." { continue; }
-            if sources_only && !source_candidate(directory, name, unsafe { (*entry).d_type })? {
-                continue;
-            }
             if output.len() >= limit { return Err(budget("Directory contains too many entries")); }
             output.push(OsString::from_vec(name.to_vec()));
         }
@@ -503,28 +455,18 @@ mod linux {
         }
 
         pub fn list(&self, max_entries: usize) -> Result<Vec<Entry>, Failure> {
-            self.list_kind(max_entries, false)
-        }
-
-        /// Bounded source-only library discovery: asset trees are never opened,
-        /// and ordinary non-source entries do not incur metadata or content reads.
-        pub fn list_sources(&self, max_entries: usize) -> Result<Vec<Entry>, Failure> {
-            self.list_kind(max_entries, true)
-        }
-
-        fn list_kind(&self, max_entries: usize, sources_only: bool) -> Result<Vec<Entry>, Failure> {
             self.healthy()?;
             let mut entries = Vec::new();
             let mut remaining = max_entries;
-            self.list_directory(&self.directory, "", 0, &mut remaining, &mut entries, sources_only)?;
+            self.list_directory(&self.directory, "", 0, &mut remaining, &mut entries)?;
             self.healthy()?;
             entries.sort_by(|a, b| a.path.cmp(&b.path));
             Ok(entries)
         }
 
-        fn list_directory(&self, directory: &File, prefix: &str, depth: usize, remaining: &mut usize, output: &mut Vec<Entry>, sources_only: bool) -> Result<(), Failure> {
+        fn list_directory(&self, directory: &File, prefix: &str, depth: usize, remaining: &mut usize, output: &mut Vec<Entry>) -> Result<(), Failure> {
             if depth >= MAX_COMPONENTS { return Err(budget("Project tree exceeds the directory depth limit")); }
-            for name in names_filtered(directory, *remaining, sources_only)? {
+            for name in names(directory, *remaining)? {
                 *remaining = remaining.checked_sub(1).ok_or_else(|| budget("Project tree exceeds its entry limit"))?;
                 let Some(name) = name.to_str() else { return Err(failure("denied_path", "Project filenames must be UTF-8")); };
                 if name.starts_with(".muzpad-") || matches!(name, ".git" | "node_modules" | "target") { continue; }
@@ -538,10 +480,10 @@ mod linux {
                 };
                 let metadata = file.metadata()?;
                 if metadata.is_dir() {
-                    self.list_directory(&file, &path, depth + 1, remaining, output, sources_only)?;
+                    self.list_directory(&file, &path, depth + 1, remaining, output)?;
                     let current = directory_at(directory, OsStr::new(name))?;
                     if Identity::of(&current)? != Identity::of(&file)? { return Err(conflict("Directory changed while being listed")); }
-                } else if metadata.is_file() && (!sources_only || name.ends_with(".muz")) {
+                } else if metadata.is_file() {
                     let stamp = Stamp::of(&file)?;
                     verify_name(directory, name, &stamp)?;
                     output.push(Entry { path, bytes: stamp.size });
@@ -1257,25 +1199,6 @@ mod linux {
             is_send::<ExportDestination>();
         }
 
-        #[test]
-        fn source_listing_skips_assets_and_counts_only_source_candidates() {
-            let project = tempfile::tempdir().unwrap();
-            std::fs::create_dir(project.path().join("assets")).unwrap();
-            std::fs::write(project.path().join("assets/hidden.muz"), b"not a library source").unwrap();
-            std::fs::create_dir(project.path().join("library")).unwrap();
-            std::fs::write(project.path().join("library/instrument.muz"), b"source").unwrap();
-            std::fs::write(project.path().join("main.muz"), b"source").unwrap();
-            for index in 0..32 {
-                std::fs::write(project.path().join(format!("sample-{index}.wav")), b"asset").unwrap();
-            }
-            symlink(project.path().join("assets"), project.path().join("linked-assets")).unwrap();
-            let root = Root::open(project.path()).unwrap();
-            let entries = root.list_sources(3).unwrap();
-            assert_eq!(entries.iter().map(|entry| entry.path.as_str()).collect::<Vec<_>>(),
-                vec!["library/instrument.muz", "main.muz"]);
-            assert!(root.list_sources(2).is_err());
-            assert!(root.list(3).is_err());
-        }
     }
 }
 

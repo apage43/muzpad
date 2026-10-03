@@ -1,5 +1,5 @@
-use super::{model::*, secure_fs::{Root, validate_path}};
-use crate::protocol::{Failure, SOURCE_DOCUMENT_BYTES, SOURCE_SNAPSHOT_BYTES};
+use super::{model::*, secure_fs::Root};
+use crate::protocol::{Failure,validate_path,SOURCE_DOCUMENT_BYTES,SOURCE_SNAPSHOT_BYTES};
 use base64::Engine;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -79,8 +79,8 @@ pub fn read_workspace(root: Arc<Root>, persisted: bool, project: String) -> Resu
             else { let id = stable_file_id(&project, &entry.path); files.insert(id.clone(), Buffer { id,path:entry.path,text:Some(text.clone()),base:Some(text),version:0,disk_version:Some(file.version),conflict:None,history:Vec::new() }); }
         } else { resources.push(resource(&project, &entry.path, entry.bytes, None, false)); }
     }
-    let settings = settings.unwrap_or_else(|| Settings { title:root.path().file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Project".into()),entry:files.values().find(|f| f.path == "main.muz").or_else(|| files.values().find(|f| text_kind(&f.path) == Some("source"))).map(|f| f.path.clone()).unwrap_or_else(|| "main.muz".into()),entries:None });
-    Ok(Workspace { project,epoch:opaque(),root,persisted,gist:None,settings,settings_base,settings_version,settings_conflict:None,source_version:0,disk_generation:0,files,resources,asset_origin:None,acknowledged_source:0,settings_history:Vec::new(),recent_saves:BTreeMap::new() })
+    let settings = settings.unwrap_or_else(|| Settings { title:root.path().file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Project".into()),entry:default_entry(files.values().filter(|f| text_kind(&f.path)==Some("source")).map(|f|f.path.as_str())),entries:None });
+    Ok(Workspace { project,epoch:opaque(),root,persisted,trusted:true,gist:None,settings,settings_base,settings_version,settings_conflict:None,source_version:0,disk_generation:0,files,resources,asset_origin:None,acknowledged_source:0,settings_history:Vec::new(),recent_saves:BTreeMap::new() })
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -151,7 +151,7 @@ pub fn import_zip(path: &Path) -> Result<Imported, Failure> {
             assets.push(ImportedAsset { path,format:format.into(),base64:String::new(),bytes:Some(bytes) });
         }
     }
-    let settings = settings.unwrap_or_else(|| Settings { title:path.file_stem().map(|v| v.to_string_lossy().into_owned()).unwrap_or_else(|| "Imported project".into()),entry:files.iter().find(|f| f.path == "main.muz").or_else(|| files.iter().find(|f| text_kind(&f.path)==Some("source"))).map(|f| f.path.clone()).unwrap_or_else(|| "main.muz".into()),entries:None });
+    let settings = settings.unwrap_or_else(|| Settings { title:path.file_stem().map(|v| v.to_string_lossy().into_owned()).unwrap_or_else(|| "Imported project".into()),entry:default_entry(files.iter().filter(|f|text_kind(&f.path)==Some("source")).map(|f|f.path.as_str())),entries:None });
     Ok(Imported { settings,files,assets,gist:None })
 }
 pub fn write_archive(workspace: &Workspace, path: &Path) -> Result<(), Failure> {
@@ -174,6 +174,11 @@ pub fn write_archive(workspace: &Workspace, path: &Path) -> Result<(), Failure> 
     }
     let file = archive.finish().map_err(zip_error)?; file.sync_all()?; Ok(())
 }
+fn default_entry<'a>(paths: impl Iterator<Item=&'a str>) -> String {
+    let paths: BTreeSet<_> = paths.collect();
+    ["song.muz","main.muz"].into_iter().find(|path|paths.contains(path))
+        .or_else(||paths.first().copied()).unwrap_or("song.muz").to_owned()
+}
 
 #[cfg(test)]
 mod tests {
@@ -191,7 +196,7 @@ mod tests {
         let child=crate::engine::sources::Grants::new(json!([
             {"id":"project","kind":"project","path":project.path().canonicalize().unwrap()},
             dto
-        ])).unwrap();
+        ]), false).unwrap();
         child.plugin(&plugin).unwrap();
         assert!(child.open(&installation.path().join("other.clap")).is_err());
     }

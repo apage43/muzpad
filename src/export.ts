@@ -1,5 +1,8 @@
 import { escapeHTML as esc } from "./views";
-import type { AcceptedRevision, ExportSpec, WorkbenchRuntime } from "./host/contracts";
+import type { AcceptedRevision, ExportSpec, Operation, WorkbenchRuntime } from "./host/contracts";
+import { revisionIdentity } from "./inspection";
+import { describeActionFailure, technicalDetails } from "./workbench-status";
+import type { ActionStatus } from "./workbench-status";
 
 type ExportRevision = AcceptedRevision & { name: string };
 
@@ -9,7 +12,7 @@ export class ProjectExporter {
   private request?: AbortController;
   private unsubscribe?: () => void;
   private dialog?: HTMLDialogElement;
-  constructor(private runtime: WorkbenchRuntime) {}
+  constructor(private runtime: WorkbenchRuntime, private operation: (signal?: AbortSignal) => Operation, private createOutcomeReporter: (revision: ExportRevision) => (status: ActionStatus) => void) {}
   set(value?: ExportRevision) {
     this.accepted = value;
     const button = document.getElementById("export-media") as HTMLButtonElement;
@@ -42,6 +45,7 @@ export class ProjectExporter {
       <label>End (seconds, including tail) <input id="export-end" type="number" min="0" step="any" value="${fullEnd}" required></label>
       </div></fieldset><button id="export-submit" class="primary" type="submit">Download WAV</button></form>
       <p id="export-status" role="status" aria-live="polite"></p><progress id="export-progress" max="1" value="0" hidden></progress>
+      <p id="export-usable" hidden></p><details id="export-diagnostics" hidden><summary>Technical diagnostics</summary><button id="export-copy-diagnostics" type="button">Copy diagnostics</button><pre id="export-technical" tabindex="0"></pre></details>
       <div class="export-footer"><button id="export-cancel" hidden>Cancel export</button><button id="export-close">Close</button></div>`;
     document.body.append(dialog);
     const get = <T extends HTMLElement = HTMLElement>(id: string) =>
@@ -54,6 +58,18 @@ export class ProjectExporter {
     const format = get<HTMLSelectElement>("export-format");
     const report = (text: string) => {
       get("export-status").textContent = text;
+    };
+    let technical: unknown;
+    const showTechnical = (value: unknown) => {
+      technical = value;
+      get("export-diagnostics").hidden = false;
+      get("export-technical").textContent = technicalDetails(value);
+      get("export-copy-diagnostics").textContent = "Copy diagnostics";
+    };
+    get("export-copy-diagnostics").onclick = () => {
+      void navigator.clipboard.writeText(technicalDetails(technical))
+        .then(() => { get("export-copy-diagnostics").textContent = "Copied"; })
+        .catch(() => { get("export-copy-diagnostics").textContent = "Select diagnostics to copy"; });
     };
     const setBusy = (busy: boolean) => {
       dialog
@@ -135,17 +151,21 @@ export class ProjectExporter {
         return;
       }
       const request = new AbortController();
-      const requestId = crypto.randomUUID();
+      const op = this.operation(request.signal);
+      const requestId = op.requestId;
+      const onOutcome = this.createOutcomeReporter(revision);
       this.request = request;
       setBusy(true);
       get<HTMLProgressElement>("export-progress").value = 0;
       report("Preparing export…");
+      get("export-usable").hidden = true;
+      let phase: string | undefined;
       this.unsubscribe = this.runtime.subscribe((event) => {
-        if (event.kind !== "exportProgress" || event.requestId !== requestId) return;
+        if (event.kind !== "exportProgress" || event.requestId !== requestId || revisionIdentity(event.ref) !== revisionIdentity(revision.ref)) return;
         const progress = get<HTMLProgressElement>("export-progress");
         if (event.progress === null) progress.removeAttribute("value");
         else progress.value = event.progress;
-        report(`${event.phase}${event.progress === null ? "…" : `… ${Math.round(event.progress * 100)}%`}`);
+        if (phase !== event.phase) { phase = event.phase; report(`${event.phase} export…`); }
       });
       const spec: ExportSpec = master ? { kind: "masterWav" }
         : kind === "midi" ? { kind: "midi", tracks: selected }
@@ -153,14 +173,33 @@ export class ProjectExporter {
           rate: Number(get<HTMLSelectElement>("export-rate").value) as 44100 | 48000 | 96000,
           bits: Number(get<HTMLSelectElement>("export-bits").value) as 16 | 24,
           start: from, end };
-      void this.runtime.export(revision.ref, spec, { requestId, signal: request.signal })
+      const action = master ? "Export master WAV" : kind === "midi" ? "Export MIDI" : "Export selected WAV";
+      const requested = { action, requestId, ref: revision.ref, spec };
+      showTechnical(requested);
+      onOutcome({ channel: "operation", requestId, action, outcome: "pending", summary: "Preparing accepted snapshot export.", nextAction: "You can continue editing.", technical: requested });
+      void this.runtime.export(revision.ref, spec, op)
         .then((result) => {
-          report(result.clipped
+          const summary = result.clipped
             ? "Exported. Some samples clipped above 0 dBFS; lower the mix level and export again."
-            : `Exported ${result.name}.`);
-        }, (error) => {
-          report(error.code === "cancelled" ? "Export cancelled."
-            : `Export failed: ${error.message ?? String(error)}`);
+            : `Exported ${result.name}.`;
+          const receipt = { ...requested, ref: result.ref, result };
+          showTechnical(receipt); report(summary);
+          onOutcome({ channel: "operation", requestId, action, outcome: "applied", summary, nextAction: "Continue editing or export another accepted snapshot.", technical: receipt });
+        }, (error: unknown) => {
+          const failure = describeActionFailure(error);
+          const detail = { ...requested, outcome: failure.outcome, diagnostic: failure.diagnostic };
+          showTechnical(detail);
+          const summary = failure.outcome === "cancelled" ? "Export cancelled."
+            : failure.outcome === "superseded" ? `Export superseded: ${failure.detail}`
+            : failure.outcome === "unknown" ? `Export outcome unknown: ${failure.detail}`
+            : failure.outcome === "partial" ? `Export partly applied: ${failure.detail}`
+            : failure.outcome === "applied" ? `Export applied with a reported issue: ${failure.detail}`
+            : `Export ${failure.outcome === "rejected" ? "rejected" : "failed"}: ${failure.detail}`;
+          const nextAction = failure.outcome === "unknown" || failure.outcome === "partial" ? "Do not assume a file was published; inspect diagnostics before choosing another action." : "Inspect diagnostics, then retry explicitly if appropriate.";
+          report(summary);
+          onOutcome({ channel: "operation", requestId, action, outcome: failure.outcome, summary, nextAction, technical: detail, location: failure.location });
+          get("export-usable").hidden = false;
+          get("export-usable").textContent = `Working buffers remain usable. This export uses accepted revision ${revision.ref.revision}, not unsaved edits. ${nextAction}`;
         }).finally(() => {
           if (this.request !== request) return;
           this.request = undefined;

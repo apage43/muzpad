@@ -1,4 +1,5 @@
 import type { Failure, PreferencesStore, WorkbenchPreferences } from "./contracts";
+import { normalizePreferences } from "../preferences";
 
 const KEY = "muzpad-preferences-v1";
 
@@ -33,12 +34,10 @@ export class WebPreferencesStore implements PreferencesStore {
       }
       const theme = this.storage.getItem("muzpad-theme");
       const inspector = this.storage.getItem("muzpad-inspector");
-      const value: WorkbenchPreferences = {
-        version: 1,
-        theme: theme === "light" || theme === "dark" ? theme : "light",
-        layout: { explorer: true, source: true, visualization: true,
-          inspector: inspector !== "closed", sourceFraction: 0.46 },
-      };
+      if (theme === null && inspector === null) return this.memory;
+      const value = normalizePreferences({version:1,theme,layout:{
+        ...(inspector === "open" || inspector === "closed" ? {inspector:inspector === "open"} : {}),
+      }});
       this.memory = value;
       await this.save(value);
       return value;

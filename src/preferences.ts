@@ -16,8 +16,8 @@ export function normalizePreferences(input: unknown): WorkbenchPreferences {
       explorer: true,
       source: true,
       visualization: true,
-      inspector: true,
-      sourceFraction: 0.46,
+      inspector: false,
+      sourceFraction: 0.60,
     },
   };
   if (!input || typeof input !== "object" || Array.isArray(input)) return value;

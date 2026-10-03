@@ -7,13 +7,16 @@ use crate::protocol::{self, Context, Failure, PrivateRequest, ProjectRef};
 use muz::{compile::Compiled, native::*};
 use parking_lot::Mutex;
 use serde_json::{json, Value};
-use std::{collections::{BTreeMap, HashMap, VecDeque}, fs::File, path::PathBuf, sync::{Arc, atomic::{AtomicBool, Ordering}, mpsc::{self, Receiver, SyncSender}}, time::{Duration, Instant}};
+use std::{cell::Cell,collections::{BTreeMap, HashMap, VecDeque}, fs::File, path::{Path,PathBuf}, sync::{Arc, atomic::{AtomicBool,Ordering}, mpsc::{self, Receiver, SyncSender}}, time::{Duration, Instant}};
 
+#[derive(Clone)]
 pub struct Accepted {
     pub compiled: Compiled,
     pub reference: Value,
     pub assets: Arc<sources::PinnedAssets>,
     runtime_revision: u64,
+    snapshot:String,
+    dependencies:Vec<Value>,
 }
 type Tokens=Arc<Mutex<HashMap<String,Arc<AtomicBool>>>>;
 type EarlyCancels=Arc<Mutex<VecDeque<(String,Instant)>>>;
@@ -33,6 +36,7 @@ impl Output {
             let failure=Failure::new("too_large","engine","Event exceeds negotiated frame budget");
             frame=protocol::event(context,self.sequence,"runtime",json!({"kind":"failure","failure":failure}));
         }
+        if frame["barrier"]==true {let mut telemetry=self.telemetry.lock();telemetry.status=None;telemetry.analysis=None;}
         self.reliable.send(frame).map_err(|_|anyhow::anyhow!("Private output closed"))
     }
     fn telemetry(&mut self,context:&Context,value:Value)->anyhow::Result<()> {
@@ -70,13 +74,19 @@ enum SourceJob {
 enum SourceResult {
     Build { id:String,result:Result<(Compiled,Arc<sources::PinnedAssets>),Failure> },
     Reply { context:Context,result:Result<Value,Failure> },
-    Progress { context:Context,snapshot:String,done:usize,total:usize },
+    Progress { context:Context,snapshot:String,done:usize,total:usize,current_entry:String,result:Value },
 }
-struct SourceWorker { sender:Option<SyncSender<SourceJob>>, receiver:Receiver<SourceResult>, thread:Option<std::thread::JoinHandle<()>> }
+struct SourceWorker { sender:Option<SyncSender<SourceJob>>, entries:Arc<Mutex<Option<SourceJob>>>, receiver:Receiver<SourceResult>, thread:Option<std::thread::JoinHandle<()>> }
 impl SourceWorker {
     fn new()->Self {
-        let (sender,jobs)=mpsc::sync_channel::<SourceJob>(64);let (results,receiver)=mpsc::channel();
-        let thread=std::thread::spawn(move||while let Ok(job)=jobs.recv(){match job {
+        let (sender,jobs)=mpsc::sync_channel::<SourceJob>(64);let (results,receiver)=mpsc::sync_channel(64);
+        let entries=Arc::new(Mutex::new(None));let latest=entries.clone();
+        let thread=std::thread::spawn(move||loop {
+            let job=match jobs.recv_timeout(Duration::from_millis(3)){
+                Ok(job)=>job,Err(mpsc::RecvTimeoutError::Timeout)=>{let Some(job)=latest.lock().take()else{continue;};job},
+                Err(mpsc::RecvTimeoutError::Disconnected)=>break,
+            };
+            match job {
             SourceJob::Build {request,snapshot,cancel}=>{let result=sources::compile(&snapshot,&snapshot.entry,cancel);if results.send(SourceResult::Build{id:request.context.request_id,result}).is_err(){break;}},
             SourceJob::Format {request,cancel}=>{
                 let result=(||{let source=string(&request.args,"source")?;if source.len()>protocol::SOURCE_DOCUMENT_BYTES{return Err(Failure::new("too_large","compile","Source document too large"));}
@@ -96,41 +106,59 @@ impl SourceWorker {
                     for (index,entry) in entries.iter().enumerate(){
                         if cancel.load(Ordering::Relaxed){return Err(cancelled("compile"));}
                         let entry=entry.as_str().ok_or_else(||invalid("Entry must be a source path"))?;
-                        let result=snapshot.path(entry).and_then(|path|sources::compile(&snapshot,&path,cancel.clone()));
-                        checked.push(match result{Ok(_)=>json!({"entry":entry,"playable":true,"failure":null}),Err(failure)=>json!({"entry":entry,"playable":false,"failure":failure})});
-                        if results.send(SourceResult::Progress{context:request.context.clone(),snapshot:snapshot.descriptor["id"].as_str().unwrap_or("").to_owned(),done:index+1,total:entries.len()}).is_err(){return Err(cancelled("compile"));}
+                        let path=snapshot.path(entry)?;
+                        let mut result=sources::classify(&snapshot,&path,cancel.clone())?;
+                        result["entry"]=json!(entry);
+                        let progress=SourceResult::Progress{context:request.context.clone(),snapshot:snapshot.descriptor["id"].as_str().unwrap_or("").to_owned(),done:index+1,total:entries.len(),current_entry:entry.to_owned(),result:result.clone()};
+                        checked.push(result);
+                        let _=results.try_send(progress);
                     }
+                    if cancel.load(Ordering::Relaxed){return Err(cancelled("compile"));}
                     Ok(json!({"snapshot":snapshot.descriptor["id"],"sourceVersion":snapshot.descriptor["sourceVersion"],"entries":checked}))
                 })();
                 if results.send(SourceResult::Reply{context:request.context,result}).is_err(){break;}
             }
         }});
-        Self{sender:Some(sender),receiver,thread:Some(thread)}
+        Self{sender:Some(sender),entries,receiver,thread:Some(thread)}
     }
-    fn submit(&self,job:SourceJob)->Result<(),Failure>{self.sender.as_ref().unwrap().try_send(job).map_err(|_|Failure::new("queue_full","compile","Source operation queue full"))}
-    fn shutdown(&mut self){self.sender.take();if let Some(thread)=self.thread.take(){let _=thread.join();}}
+    fn submit(&self,job:SourceJob)->Result<(),Failure>{
+        if matches!(job,SourceJob::Entries{..}) {
+            if let Some(SourceJob::Entries{cancel,..})=self.entries.lock().replace(job){cancel.store(true,Ordering::Relaxed);}return Ok(());
+        }
+        self.sender.as_ref().unwrap().try_send(job).map_err(|_|Failure::new("queue_full","compile","Source operation queue full"))
+    }
+    fn shutdown(&mut self){self.sender.take();self.entries.lock().take();if let Some(thread)=self.thread.take(){
+        while !thread.is_finished(){let _=self.receiver.recv_timeout(Duration::from_millis(5));}
+        let _=thread.join();
+    }}
 }
 struct Build {
     request:PrivateRequest,snapshot:Arc<sources::Snapshot>,cancel:Arc<AtomicBool>,candidate:Option<Compiled>,assets:Option<Arc<sources::PinnedAssets>>,
-    prepared:Option<PreparedNativeRevision>,ticket:Option<RevisionTicket>,reference:Value,initial:Value,effect:Value,authorized:bool,preparation_reported:bool,
+    prepared:Option<PreparedNativeRevision>,ticket:Option<RevisionTicket>,reference:Value,initial:Value,effect:Value,authorized:bool,authorization:String,preparation_reported:bool,dependencies:Vec<Value>,
+    superseded:bool,
 }
-#[derive(Default)]
-struct Subscription { enabled:bool,source:Option<String> }
-struct Control { context:Context,stop_seek:bool,stop_active:bool,void:bool,expected_generation:u64,cancel:Arc<AtomicBool>,subscription:Option<Subscription> }
-struct Restart { prepared:Option<PreparedNativeRevision>,ticket:RevisionTicket }
+#[derive(Clone)]
+struct Subscription { detail:bool,meters:bool,detail_hz:u8,meter_hz:u8,source:Option<String> }
+impl Default for Subscription {fn default()->Self {Self{detail:false,meters:true,detail_hz:30,meter_hz:20,source:None}}}
+struct Control { request:PrivateRequest,stop_seek:bool,paused:bool,void:bool,expected_generation:u64,cancel:Arc<AtomicBool>,subscription:Option<Subscription> }
+struct Restart { prepared:Option<PreparedNativeRevision>,ticket:RevisionTicket,request:String,authorization:String,authorized:bool }
 struct Coordinator {
     output:Output,tokens:Tokens,early_cancels:EarlyCancels,epoch:Option<String>,project:Option<ProjectRef>,grants:Option<Arc<sources::Grants>>,
     uploads:BTreeMap<String,sources::Upload>,snapshots:BTreeMap<String,Arc<sources::Snapshot>>,snapshot_order:VecDeque<String>,
     runtime:Option<NativeRuntime>,final_status:Option<NativeStatus>,empty:muz::Session,current:Option<Arc<Accepted>>,previous:Option<Arc<Accepted>>,
     active:Option<Build>,queued:Option<PrivateRequest>,controls:HashMap<u64,Control>,restart:Option<Restart>,restart_requested:Option<PluginRestartRequest>,tail_pause:Option<NativeOperationId>,
     source:SourceWorker,exports:exports::Scheduler,analysis:analysis::Analysis,subscription:Subscription,meters:Value,
-    resolved:VecDeque<String>,pending:HashMap<String,Context>,last_status:Instant,stopping:bool,
+    resolved:VecDeque<String>,pending:HashMap<String,Context>,last_status:Instant,status_sequence:Cell<u64>,stopping:bool,
+    deferred:VecDeque<PrivateRequest>,desired_audition:Option<PrivateRequest>,desired_analysis:Option<PrivateRequest>,
+    latest_scan:Option<String>,analysis_clock:Option<(u64,u64)>,
+    preview_waiter:Option<Context>,preview_frozen:bool,
 }
 impl Coordinator {
     fn new(output:Output,tokens:Tokens,early_cancels:EarlyCancels)->Self {
         Self{output,tokens,early_cancels,epoch:None,project:None,grants:None,uploads:BTreeMap::new(),snapshots:BTreeMap::new(),snapshot_order:VecDeque::new(),
             runtime:None,final_status:None,empty:empty_session(),current:None,previous:None,active:None,queued:None,controls:HashMap::new(),restart:None,restart_requested:None,tail_pause:None,
-            source:SourceWorker::new(),exports:exports::Scheduler::new(),analysis:analysis::Analysis::new(),subscription:Subscription::default(),meters:json!([]),resolved:VecDeque::new(),pending:HashMap::new(),last_status:Instant::now(),stopping:false}
+            source:SourceWorker::new(),exports:exports::Scheduler::new(),analysis:analysis::Analysis::new(),subscription:Subscription::default(),meters:json!([]),resolved:VecDeque::new(),pending:HashMap::new(),last_status:Instant::now(),status_sequence:Cell::new(0),stopping:false,
+            deferred:VecDeque::new(),desired_audition:None,desired_analysis:None,latest_scan:None,analysis_clock:None,preview_waiter:None,preview_frozen:false}
     }
     fn token(&self,id:&str)->Arc<AtomicBool>{
         let early={
@@ -142,7 +170,8 @@ impl Coordinator {
         if early{token.store(true,Ordering::Relaxed);}token
     }
     fn finish(&mut self,context:&Context,result:Result<Value,Failure>)->anyhow::Result<()> {
-        self.pending.remove(&context.request_id);self.tokens.lock().remove(&context.request_id);
+        let explicit=self.pending.remove(&context.request_id).is_some();self.tokens.lock().remove(&context.request_id);
+        if !explicit {if let Err(failure)=result {return self.output.event(context,"runtime",json!({"kind":"failure","failure":failure}));}return Ok(());}
         self.resolved.push_back(context.request_id.clone());if self.resolved.len()>128{self.resolved.pop_front();}
         self.output.reply(context,result)
     }
@@ -157,10 +186,10 @@ impl Coordinator {
         if let Err(failure)=context.validate(){return self.output.reply(&context,Err(failure));}
         if self.pending.contains_key(&context.request_id)||self.resolved.contains(&context.request_id){return self.output.reply(&context,Err(Failure::new("stale_request","engine","Request identity already used")));}
         if request.command!="hello" && (self.epoch.is_none()||context.engine_epoch!=self.epoch){return self.output.reply(&context,Err(Failure::new("stale_request","engine","Engine epoch does not match")));}
-        if !["hello","configureProject","shutdown","cancel","cancelExport"].contains(&request.command.as_str()) && context.project!=self.project {
+        if !["hello","configureProject","preparePreview","resumeProject","format","shutdown","cancel","cancelExport"].contains(&request.command.as_str()) && context.project!=self.project {
             return self.output.reply(&context,Err(Failure::new("stale_request","engine","Project epoch does not match")));
         }
-        if ["inspect","explain","location","diff","transport","setAudition","setAnalysisSubscription","startExport"].contains(&request.command.as_str()){
+        if ["inspect","explain","location","diff","sourceDocument","transport","setAudition","setAnalysisSubscription","startExport"].contains(&request.command.as_str()){
             let reference=&request.args["ref"];
             if reference["engineEpoch"].as_str()!=context.engine_epoch.as_deref()
                 || reference["revision"].as_str()!=context.revision.as_deref()
@@ -174,8 +203,55 @@ impl Coordinator {
         }
         self.pending.insert(context.request_id.clone(),context.clone());
         self.token(&context.request_id);
-        let result=self.dispatch(request);
-        match result {Ok(Some(value))=>self.finish(&context,Ok(value)),Ok(None)=>Ok(()),Err(failure)=>self.finish(&context,Err(failure))}
+        let attempted=request.clone();let result=self.dispatch(request);
+        match result {Ok(Some(value))=>self.finish(&context,Ok(value)),Ok(None)=>Ok(()),Err(failure)=>{let failure=self.action_failure(&attempted,failure,false,None);self.finish(&context,Err(failure))}}
+    }
+    fn action_failure(&self,request:&PrivateRequest,mut failure:Failure,partial:bool,expected:Option<u64>)->Failure {
+        let action=action(request);
+        let outcome=if partial{"partial"}else{match failure.code.as_str(){"cancelled"=>"cancelled","superseded"=>"superseded","child_died"|"output_fault"=>"unknown",_=>"rejected"}};
+        failure.operation=Some(json!({"action":action,"requestId":request.context.request_id,"ref":request.args.get("attemptedRef").or_else(||request.args.get("ref")).or_else(||request.args.get("base")).cloned().unwrap_or(Value::Null),
+            "outcome":outcome,"continuity":failure.continuity,"phase":failure.phase,
+            "expectedRuntimeRevision":failure.runtime.as_ref().and_then(|runtime|runtime["expectedRevision"].as_str()).map(str::to_owned).or_else(||expected.map(|revision|revision.to_string())),
+            "actualRuntimeRevision":failure.runtime.as_ref().and_then(|runtime|runtime["observedRevision"].as_str()).map(str::to_owned).or_else(||self.runtime.as_ref().map(|runtime|runtime.status().runtime_revision.to_string()))}));
+        failure
+    }
+    const DEFERRED_CONTROL_LIMIT:usize=32;
+    fn boundary(&self)->bool {
+        self.restart.is_some() || self.tail_pause.is_some() || self.active.as_ref().is_some_and(|build|build.candidate.is_some()||build.prepared.is_some()||build.ticket.is_some())
+    }
+    fn defer_control(&mut self,request:PrivateRequest)->Result<(),Failure> {
+        if request.command=="setAudition"||request.command=="setAnalysisSubscription" {
+            let old=if request.command=="setAudition"{self.desired_audition.replace(request)}else{self.desired_analysis.replace(request)};
+            if let Some(old)=old {let failure=self.action_failure(&old,Failure::new("superseded","transport","A newer desired state replaced this request"),false,None);self.finish(&old.context,Err(failure)).map_err(engine_failure)?;}
+        } else {
+            if self.deferred.len()>=Self::DEFERRED_CONTROL_LIMIT{return Err(Failure::new("queue_full","transport","Deferred explicit operation budget exceeded"));}
+            self.deferred.push_back(request);
+        }Ok(())
+    }
+    fn resume_controls(&mut self)->anyhow::Result<()> {
+        if self.boundary()||!self.controls.is_empty(){return Ok(());}
+        let request=self.deferred.pop_front().or_else(||self.desired_audition.take()).or_else(||self.desired_analysis.take());
+        if let Some(mut request)=request {
+            if global_control(&request)||request.command=="setAnalysisSubscription" {if let Some(current)=&self.current {request.args["attemptedRef"]=request.args["ref"].clone();request.args["ref"]=current.reference.clone();}}
+            let attempted=request.clone();
+            if let Err(failure)=self.submit_control(request){let failure=self.action_failure(&attempted,failure,false,None);self.finish(&attempted.context,Err(failure))?;}
+        }Ok(())
+    }
+    fn settle_control(&mut self,control:Control,result:Result<Value,Failure>,expected:u64)->anyhow::Result<()> {
+        let result=result.map_err(|failure|self.action_failure(&control.request,failure,control.paused,Some(expected)));
+        self.finish(&control.request.context,result)
+    }
+    fn register_subscription(&mut self)->anyhow::Result<()> {
+        self.analysis.clear();self.analysis_clock=None;self.output.telemetry.lock().analysis=None;
+        let Some(current)=&self.current else{return Ok(());};
+        if self.subscription.source.as_ref().is_some_and(|id|!current.compiled.session.tracks.iter().any(|track|track.id.to_string()==*id)) {
+            self.subscription.detail=false;self.subscription.source=None;
+        }
+        if self.desired_analysis.is_none() {
+            let mut context=self.context();context.revision=current.reference["revision"].as_str().map(str::to_owned);context.source_version=current.reference["sourceVersion"].as_u64();
+            self.desired_analysis=Some(PrivateRequest{context,command:"setAnalysisSubscription".into(),args:json!({"ref":current.reference,"subscription":{
+                "detail":self.subscription.detail,"meters":self.subscription.meters,"detailHz":self.subscription.detail_hz,"meterHz":self.subscription.meter_hz,"source":self.subscription.source}})});
+        }Ok(())
     }
     fn dispatch(&mut self,request:PrivateRequest)->Result<Option<Value>,Failure> {
         let args=&request.args;
@@ -188,11 +264,25 @@ impl Coordinator {
             },
             "configureProject"=>{
                 let project:ProjectRef=serde_json::from_value(args["project"].clone()).map_err(|e|invalid(e.to_string()))?;
-                let grants=if args["readGrants"].as_array().is_some_and(Vec::is_empty){None}else{Some(sources::Grants::new(args["readGrants"].clone())?)};
+                let trusted=args["trustedRead"].as_bool().ok_or_else(||invalid("Missing parent read policy"))?;
+                let grants=if args["readBindings"].as_array().is_some_and(Vec::is_empty){None}else{Some(sources::Grants::new(args["readBindings"].clone(),trusted)?)};
                 if self.project.as_ref()!=Some(&project){self.retire_project().map_err(engine_failure)?;}
                 self.project=Some(project);self.grants=grants;Ok(Some(Value::Null))
             },
+            "preparePreview"=>{
+                if self.preview_waiter.is_some(){return Err(Failure::new("queue_full","project","Imported preview transition is already awaiting receipts"));}
+                self.preview_frozen=true;
+                if let Some(queued)=self.queued.take(){let failure=self.action_failure(&queued,Failure::new("superseded","compile","Imported preview replaced the queued candidate"),false,None);self.finish(&queued.context,Err(failure)).map_err(engine_failure)?;}
+                if let Some(active)=&mut self.active {
+                    active.superseded=true;active.cancel.store(true,Ordering::Relaxed);
+                    if let Some(ticket)=active.ticket {self.runtime.as_mut().unwrap().cancel_operation(ticket.operation).map_err(|error|native_failure(error,"apply"))?;}
+                }
+                if let Some(scan)=self.latest_scan.take(){self.token(&scan).store(true,Ordering::Relaxed);if let Some(context)=self.pending.get(&scan).cloned(){self.finish(&context,Err(Failure::new("superseded","compile","Imported preview replaced entry discovery"))).map_err(engine_failure)?;}}
+                self.source.entries.lock().take();self.preview_waiter=Some(request.context);Ok(None)
+            },
+            "resumeProject"=>{self.preview_frozen=false;Ok(Some(Value::Null))},
             "snapshotBegin"=>{
+                if !self.grants.as_ref().is_some_and(|policy|policy.trusted){return Err(Failure::new("trust_required","compile","Parent trust is required before evaluating imported content"));}
                 let id=string(&args["snapshot"],"id")?.to_owned();
                 if self.uploads.contains_key(&id){return Err(invalid("Snapshot identity is already uploading"));}
                 if self.snapshots.get(&id).is_some_and(|s|s.descriptor!=args["snapshot"]){return Err(invalid("Snapshot identity cannot change its descriptor"));}
@@ -219,23 +309,45 @@ impl Coordinator {
             "snapshotDiscard"=>{let id=string(args,"snapshot")?;if self.snapshots.get(id).is_some_and(|s|Arc::strong_count(s)>1){return Err(Failure::new("resource_budget","compile","Snapshot remains pinned"));}self.uploads.remove(id);self.snapshots.remove(id);self.snapshot_order.retain(|s|s!=id);Ok(Some(Value::Null))},
             "format"=>{let cancel=self.token(&request.context.request_id);self.source.submit(SourceJob::Format{request,cancel})?;Ok(None)},
             "checkEntries"=>{
+                if self.preview_frozen{return Err(Failure::new("trust_required","compile","Entry evaluation is suspended while imported content is a preview"));}
                 let snapshot=self.snapshot(string(args,"snapshot")?)?;
                 if request.context.source_version!=snapshot.descriptor["sourceVersion"].as_u64(){return Err(Failure::new("stale_request","compile","Entry check source version does not match snapshot"));}
+                if let Some(previous)=self.latest_scan.replace(request.context.request_id.clone()){
+                    self.token(&previous).store(true,Ordering::Relaxed);
+                    if let Some(context)=self.pending.get(&previous).cloned(){self.finish(&context,Err(Failure::new("superseded","compile","A newer source capture replaced entry discovery"))).map_err(engine_failure)?;}
+                }
                 let cancel=self.token(&request.context.request_id);self.source.submit(SourceJob::Entries{request,snapshot,cancel})?;Ok(None)
             },
             "rebuild"=>{
+                if self.preview_frozen{return Err(Failure::new("trust_required","compile","Builds are suspended until the imported preview is trusted or cancelled"));}
                 self.snapshot(string(args,"snapshot")?)?;
+                if let Some(previous)=self.latest_scan.take(){
+                    self.token(&previous).store(true,Ordering::Relaxed);
+                    if let Some(context)=self.pending.get(&previous).cloned(){self.finish(&context,Err(Failure::new("superseded","compile","Explicit rebuild replaced entry discovery"))).map_err(engine_failure)?;}
+                    self.source.entries.lock().take();
+                }
                 if self.active.is_some()||self.restart.is_some(){
-                    if let Some(old)=self.queued.replace(request.clone()){self.finish(&old.context,Err(cancelled("compile"))).map_err(engine_failure)?;}
-                    if let Some(active)=&self.active {if active.ticket.is_none(){active.cancel.store(true,Ordering::Relaxed);}}
+                    if let Some(old)=self.queued.replace(request.clone()){let failure=self.action_failure(&old,Failure::new("superseded","compile","A newer build replaced the queued candidate"),false,None);self.finish(&old.context,Err(failure)).map_err(engine_failure)?;}
+                    if let Some(active)=&mut self.active {if active.ticket.is_none(){active.superseded=true;active.cancel.store(true,Ordering::Relaxed);}}
                     self.build_event(&request,"queued",None).map_err(engine_failure)?;
                 }else{self.start_build(request)?;}
                 Ok(None)
             },
             "authorizeApply"=>{
                 let target=string(args,"target")?;
+                if self.restart.as_ref().is_some_and(|restart|restart.request==target) {
+                    let restart=self.restart.as_mut().unwrap();
+                    if restart.authorization!=string(args,"authorization")? {return Err(Failure::new("superseded","apply","Plugin restart authorization expired"));}
+                    if args["allowed"]==true {restart.authorized=true;} else {
+                        self.restart=None;
+                        let failure=serde_json::from_value::<Failure>(args["failure"].clone()).unwrap_or_else(|_|Failure::new("changed_asset","apply","Retained plugin resources failed authorization"));
+                        self.output.event(&request.context,"runtime",json!({"kind":"failure","failure":failure})).map_err(engine_failure)?;
+                    }
+                    return Ok(Some(Value::Null));
+                }
                 let active=self.active.as_mut().filter(|b|b.request.context.request_id==target).ok_or_else(||Failure::new("stale_request","apply","Prepared request expired"))?;
                 if active.prepared.is_none()||active.ticket.is_some(){return Err(Failure::new("stale_request","apply","Request is not awaiting authorization"));}
+                if args["authorization"].as_str()!=Some(active.authorization.as_str()){return Err(Failure::new("superseded","apply","Authorization targets an obsolete preparation"));}
                 if args["allowed"].as_bool()!=Some(true){
                     let failure=serde_json::from_value(args["failure"].clone()).unwrap_or_else(|_|Failure::new("source_conflict","apply","Source authorization denied"));
                     self.reject_build(failure).map_err(engine_failure)?;
@@ -251,6 +363,7 @@ impl Coordinator {
                 let result=match request.command.as_str(){"inspect"=>inspection::inspect(accepted,args),"explain"=>inspection::explain(accepted,args),"location"=>inspection::location(accepted,args),_=>inspection::diff(accepted,self.previous.as_deref().filter(|p|p.reference!=accepted.reference),args)}?;
                 Ok(Some(result))
             },
+            "sourceDocument"=>{let accepted=self.lookup(&args["ref"],false)?;Ok(Some(accepted.assets.document(Path::new(string(args,"path")?))?.unwrap_or(Value::Null)))},
             "transport"|"setAudition"|"setAnalysisSubscription"=>{self.control(request)?;Ok(None)},
             "startExport"=>{
                 let accepted=self.lookup(&args["ref"],false)?.clone();
@@ -278,7 +391,7 @@ impl Coordinator {
         let cancel=self.token(&request.context.request_id);
         self.source.submit(SourceJob::Build{request:request.clone(),snapshot:snapshot.clone(),cancel:cancel.clone()})?;
         self.build_event(&request,"compiling",None).map_err(engine_failure)?;
-        self.active=Some(Build{request,snapshot,cancel,candidate:None,assets:None,prepared:None,ticket:None,reference:Value::Null,initial:Value::Null,effect:Value::Null,authorized:false,preparation_reported:false});Ok(())
+        self.active=Some(Build{request,snapshot,cancel,candidate:None,assets:None,prepared:None,ticket:None,reference:Value::Null,initial:Value::Null,effect:Value::Null,authorized:false,authorization:String::new(),superseded:false,preparation_reported:false,dependencies:Vec::new()});Ok(())
     }
     fn build_event(&mut self,request:&PrivateRequest,phase:&str,failure:Option<&Failure>)->anyhow::Result<()> {
         self.output.event(&request.context,"runtime",json!({"kind":"build","requestId":request.context.request_id,"project":request.context.project,"sourceVersion":request.context.source_version,"phase":phase,"ref":if phase=="accepted"{self.current.as_ref().map(|a|a.reference.clone()).unwrap_or(Value::Null)}else{Value::Null},"failure":failure}))
@@ -286,6 +399,8 @@ impl Coordinator {
     fn reject_build(&mut self,mut failure:Failure)->anyhow::Result<()> {
         if self.current.is_none(){failure.continuity="not-started".into();}
         if let Some(build)=self.active.take(){
+            if build.superseded && failure.code=="cancelled" {failure.code="superseded".into();failure.message="A newer build superseded this unsubmitted candidate".into();}
+            failure=self.action_failure(&build.request,failure,false,build.ticket.map(|ticket|ticket.revision));
             build.cancel.store(true,Ordering::Relaxed);
             self.build_event(&build.request,if failure.code=="cancelled"{"cancelled"}else{"rejected"},Some(&failure))?;
             self.finish(&build.request.context,Err(failure))?;
@@ -295,6 +410,9 @@ impl Coordinator {
         if !self.active.as_ref().is_some_and(|b|b.request.context.request_id==id){return Ok(());}
         let (mut candidate,assets)=match result{Ok(value)=>value,Err(f)=>return self.reject_build(f)};
         if self.active.as_ref().unwrap().cancel.load(Ordering::Relaxed){return self.reject_build(cancelled("compile"));}
+        if !self.controls.is_empty()||self.tail_pause.is_some()||self.restart.is_some(){
+            let active=self.active.as_mut().unwrap();active.candidate=Some(candidate);active.assets=Some(assets);return Ok(());
+        }
         let request=self.active.as_ref().unwrap().request.clone();
         if let Err(failure)=self.check_base(&request){return self.reject_build(failure);}
         if !self.active.as_ref().unwrap().preparation_reported{
@@ -329,12 +447,14 @@ impl Coordinator {
         if reserved>=protocol::FRAME_BYTES{return self.reject_build(Failure::new("too_large","prepare","Accepted status and track metadata exceed the private frame budget"));}
         let initial=match inspection::initial_pages(&candidate,&reference,protocol::FRAME_BYTES-reserved){Ok(p)=>p,Err(f)=>return self.reject_build(f)};
         assets.freeze();
-        let mut dependencies=snapshot.dependencies();dependencies.extend(assets.dependencies());
+        let dependencies=match dependency_manifest(&assets){Ok(dependencies)=>dependencies,Err(failure)=>return self.reject_build(failure)};
         if serde_json::to_vec(&dependencies)?.len()>protocol::FRAME_BYTES-4096{
             return self.reject_build(Failure::new("resource_budget","prepare","Dependency manifest exceeds private validation budget"));
         }
         let active=self.active.as_mut().unwrap();active.candidate=Some(candidate);active.assets=Some(assets);active.prepared=Some(prepared);active.reference=reference;active.initial=initial;active.effect=effect;
-        self.output.event(&request.context,"internal",json!({"kind":"prepared","requestId":request.context.request_id,"snapshot":request.args["snapshot"],"dependencyVersions":dependencies}))
+        active.authorized=false;active.authorization=uuid::Uuid::new_v4().to_string();active.dependencies=dependencies.clone();
+        let authorization=active.authorization.clone();
+        self.output.event(&request.context,"internal",json!({"kind":"prepared","requestId":request.context.request_id,"authorization":authorization,"snapshot":request.args["snapshot"],"dependencyVersions":dependencies}))
     }
     fn submit_build(&mut self)->anyhow::Result<()> {
         let Some(active)=&self.active else{return Ok(());};
@@ -345,7 +465,14 @@ impl Coordinator {
         let prepared=self.active.as_mut().unwrap().prepared.take().unwrap();
         match self.runtime.as_mut().unwrap().submit_revision(prepared){
             Ok(ticket)=>{let request=self.active.as_ref().unwrap().request.clone();self.active.as_mut().unwrap().ticket=Some(ticket);self.build_event(&request,"applying",None)?;},
-            Err(error)=>{if error.error.code==NativeErrorCode::QueueFull{self.active.as_mut().unwrap().prepared=Some(error.prepared);}else{return self.reject_build(native_failure(error.error,"apply"));}}
+            Err(error)=>{
+                if error.error.code==NativeErrorCode::QueueFull||error.error.code==NativeErrorCode::Busy{self.active.as_mut().unwrap().prepared=Some(error.prepared);}
+                else if error.error.code==NativeErrorCode::Superseded {
+                    // Retain the exact compilation and pins, but recapture acknowledged
+                    // runtime policy and renew parent authorization before submission.
+                    let active=self.active.as_mut().unwrap();active.authorized=false;active.authorization.clear();
+                }else{return self.reject_build(native_failure(error.error,"apply"));}
+            }
         }Ok(())
     }
     fn cancel(&mut self,target:&str)->Result<&'static str,Failure>{
@@ -354,27 +481,35 @@ impl Coordinator {
         self.token(target).store(true,Ordering::Relaxed);
         if self.queued.as_ref().is_some_and(|q|q.context.request_id==target){let queued=self.queued.take().unwrap();self.finish(&queued.context,Err(cancelled("compile"))).map_err(engine_failure)?;}
         if let Some(active)=&self.active{if active.request.context.request_id==target{if let Some(ticket)=active.ticket{self.runtime.as_mut().unwrap().cancel_operation(ticket.operation).map_err(|e|native_failure(e,"apply"))?;}}}
-        let operations:Vec<u64>=self.controls.iter().filter(|(_,c)|c.context.request_id==target).map(|(id,_)|*id).collect();
+        let operations:Vec<u64>=self.controls.iter().filter(|(_,c)|c.request.context.request_id==target).map(|(id,_)|*id).collect();
         for operation in operations{self.runtime.as_mut().unwrap().cancel_operation(NativeOperationId(operation)).map_err(|e|native_failure(e,"transport"))?;}
         self.exports.cancel(target);Ok("requested")
     }
     fn control(&mut self,request:PrivateRequest)->Result<(),Failure>{
-        if self.controls.len()>=64{return Err(Failure::new("queue_full","transport","Control outcome budget exceeded"));}
-        let accepted=self.lookup(&request.args["ref"],true)?.clone();
-        if self.controls.values().any(|c|c.stop_active){return Err(Failure::new("stale_transport","transport","Stop is awaiting its rewind receipt"));}
+        if self.token(&request.context.request_id).load(Ordering::Relaxed){return Err(cancelled("transport"));}
+        if self.preview_frozen&&!global_control(&request)&&request.command!="setAnalysisSubscription"{
+            return Err(Failure::new("trust_required","transport","Score-bound controls are disabled while imported content is a preview"));
+        }
+        self.defer_control(request)
+    }
+    fn submit_control(&mut self,request:PrivateRequest)->Result<(),Failure>{
         let cancel=self.token(&request.context.request_id);if cancel.load(Ordering::Relaxed){return Err(cancelled("transport"));}
+        let accepted=self.lookup(&request.args["ref"],true)?.clone();
         let runtime=self.runtime.as_mut().ok_or_else(||Failure::new("audio_unavailable","transport","Native output is not running"))?;
         let before=runtime.status().transport;let generation=before.generation;let was_running=before.snapshot.running;let revision=accepted.runtime_revision;
         let context=sources::context(accepted.assets.clone(),cancel.clone());
         let mut stop_seek=false;let mut void=false;
         let ticket=match request.command.as_str(){
-            "setAudition"=>{void=true;let ids:Vec<String>=serde_json::from_value(request.args["physicalIds"].clone()).map_err(|e|invalid(e.to_string()))?;runtime.set_audibility(revision,&ids)},
+            "setAudition"=>{void=true;let ids:Vec<String>=serde_json::from_value(request.args["physicalIds"].clone()).map_err(|e|invalid(e.to_string()))?;
+                if ids.iter().any(|id|!accepted.compiled.session.tracks.iter().any(|track|track.id.to_string()==*id)){return Err(Failure::new("stale_revision","transport","Listening selection includes a removed track"));}
+                runtime.set_audibility(revision,&ids)},
             "setAnalysisSubscription"=>{
-                void=true;let enabled=request.args["enabled"].as_bool().ok_or_else(||invalid("Missing subscription enabled flag"))?;
-                let analysis=if enabled{Some(match request.args["source"].as_str(){Some(id)=>ObservationTarget::Track(id.to_owned()),None=>ObservationTarget::Master})}else{None};
-                let tracks=accepted.compiled.session.tracks.iter().map(|t|t.id.to_string()).collect::<Vec<_>>();
+                void=true;let subscription=subscription(&request.args)?;
+                let analysis=if subscription.detail{Some(match subscription.source.clone(){Some(id)=>ObservationTarget::Track(id),None=>ObservationTarget::Master})}else{None};
+                let tracks=if subscription.meters {accepted.compiled.session.tracks.iter().map(|t|t.id.to_string()).collect::<Vec<_>>()}else{Vec::new()};
                 if tracks.len()>1000{return Err(Failure::new("resource_budget","transport","Track meter subscription exceeds 1000 physical tracks"));}
-                runtime.set_observation(revision,&ObservationSelection{meter_tracks:tracks,master_meter:true,analysis,meter_hz:20,analysis_hz:if enabled{10}else{0}})
+                if subscription.source.as_ref().is_some_and(|id|!accepted.compiled.session.tracks.iter().any(|track|track.id.to_string()==*id)){return Err(Failure::new("stale_revision","transport","Analysis source no longer exists"));}
+                runtime.set_observation(revision,&ObservationSelection{meter_tracks:tracks,master_meter:subscription.meters,analysis,meter_hz:if subscription.meters{subscription.meter_hz}else{0},analysis_hz:if subscription.detail{subscription.detail_hz}else{0}})
             },
             _=>match string(&request.args["command"],"kind")?{
                 "play"=>runtime.set_running(revision,true),"pause"=>runtime.set_running(revision,false),
@@ -386,48 +521,46 @@ impl Coordinator {
             }
         }.map_err(|e|native_failure(e,"transport"))?;
         let expected_generation=generation.saturating_add(u64::from(stop_seek&&was_running));
-        let subscription=(request.command=="setAnalysisSubscription").then(||Subscription{enabled:request.args["enabled"].as_bool().unwrap_or(false),source:request.args["source"].as_str().map(str::to_owned)});
-        self.controls.insert(ticket.operation.0,Control{context:request.context,stop_seek,stop_active:stop_seek,void,expected_generation,cancel,subscription});Ok(())
+        let subscription=if request.command=="setAnalysisSubscription"{Some(subscription(&request.args)?)}else{None};
+        self.controls.insert(ticket.operation.0,Control{request,stop_seek,paused:false,void,expected_generation,cancel,subscription});Ok(())
     }
     fn status(&self,transport:Option<NativeTransportStatus>)->Result<Value,Failure>{
         let accepted=self.current.as_ref().ok_or_else(||Failure::new("stale_revision","transport","No accepted revision"))?;
         let status=self.runtime.as_ref().map(NativeRuntime::status).or_else(||self.final_status.clone()).ok_or_else(||Failure::new("audio_unavailable","transport","Native output unavailable"))?;
         let t=transport.unwrap_or(status.transport);let snapshot=t.snapshot;let playing=snapshot.running;
         let ppq=accepted.compiled.session.tracks.iter().find_map(|track|match &track.source{muz::model::TrackSource::Midi(midi)=>Some(midi.summary.ppq as f64),_=>None}).unwrap_or(muz::model::TICKS_PER_BEAT as f64);
-        Ok(json!({"ref":accepted.reference,"generation":t.generation.to_string(),"playing":playing,"finished":tail_complete(t,accepted.compiled.session.extras.tail),
+        let sequence=self.status_sequence.get().checked_add(1).ok_or_else(||Failure::new("resource_budget","transport","Transport status sequence exhausted"))?;self.status_sequence.set(sequence);
+        Ok(json!({"ref":accepted.reference,"generation":t.generation.to_string(),"sequence":sequence.to_string(),"playing":playing,"finished":tail_complete(t,accepted.compiled.session.extras.tail),
             "beat":snapshot.beat_position,"seconds":snapshot.project_frame/snapshot.sample_rate,"bpm":snapshot.bpm,"meter":snapshot.meter,
             "duration":t.end_project_frame/snapshot.sample_rate,"endBeat":t.end_tick as f64/ppq,"tail":accepted.compiled.session.extras.tail,
             "loop":t.loop_range.map(|(start,end)|[start as f64/960000.,end as f64/960000.]),"peak":if playing{status.last_peak}else{0.},"rms":if playing{status.last_rms}else{0.},
             "meters":if playing{self.meters.clone()}else{json!([])},"audio":audio_configuration(&status),
-            "health":{"acceptedRevision":status.accepted_revision.to_string(),"runtimeRevision":status.runtime_revision.to_string(),"sourceGeneration":status.source_generation.to_string(),"runtimeMappingPending":status.runtime_mapping_pending,"deliveredEvents":status.delivered_events,"devices":status.devices,"streamStartCount":status.stream_start_count.to_string(),"audio":status.audio,"observationDropped":status.observation_dropped.to_string()}}))
+            "health":{"acceptedRevision":status.accepted_revision.to_string(),"runtimeRevision":status.runtime_revision.to_string(),"sourceGeneration":status.source_generation.to_string(),"runtimeMappingPending":status.runtime_mapping_pending,
+                "deliveredEvents":counter_fields(json!(status.delivered_events),&["note_ons","note_offs","controllers"]),
+                "devices":status.devices.iter().map(|device|counter_fields(json!(device),&["instance_token","process_count"])).collect::<Vec<_>>(),
+                "streamStartCount":status.stream_start_count.to_string(),
+                "audio":counter_fields(json!(status.audio),&["stream_generation","callback_count","render_faults","stream_errors","transaction_commits","transaction_faults","structural_commits"]),
+                "observationDropped":status.observation_dropped.to_string()}}))
     }
     fn native_event(&mut self,event:NativeEvent)->anyhow::Result<()> {
         match event {
             NativeEvent::RevisionApplied{ticket,transport,plugin_stamp,..}=>{
                 if self.active.as_ref().is_some_and(|b|b.ticket==Some(ticket)){
                     let mut build=self.active.take().unwrap();let mut compiled=build.candidate.take().unwrap();plugin_stamp.apply(&mut compiled.session);
-                    let accepted=Arc::new(Accepted{compiled,reference:build.reference,assets:build.assets.take().unwrap(),runtime_revision:ticket.revision});
+                    let assets=build.assets.take().unwrap();let dependencies=build.dependencies;
+                    let accepted=Arc::new(Accepted{compiled,reference:build.reference,assets,runtime_revision:ticket.revision,snapshot:string(&build.request.args,"snapshot")?.to_owned(),dependencies});
                     self.previous=self.current.replace(accepted);self.meters=json!([]);
                     let value=json!({"ref":self.current.as_ref().unwrap().reference,"status":self.status(Some(transport))?,"effect":build.effect,"initialPages":build.initial,"exportTracks":inspection::export_tracks(&self.current.as_ref().unwrap().compiled)});
                     self.build_event(&build.request,"accepted",None)?;self.finish(&build.request.context,Ok(value))?;
                     self.output.event(&self.context(),"runtime",json!({"kind":"engine","state":"ready","engineEpoch":self.epoch,"capabilities":self.capabilities(),"failure":null}))?;
-                    let current=self.current.as_ref().unwrap();let tracks=current.compiled.session.tracks.iter().map(|t|t.id.to_string()).collect::<Vec<_>>();
-                    if self.subscription.source.as_ref().is_some_and(|id|!tracks.contains(id)){self.subscription=Subscription::default();self.analysis.clear();}
-                    let analysis=if self.subscription.enabled{Some(self.subscription.source.clone().map_or(ObservationTarget::Master,ObservationTarget::Track))}else{None};
-                    if let Some(runtime)=self.runtime.as_mut(){
-                        if tracks.len()<=1000 {
-                            if let Err(error)=runtime.set_observation(ticket.revision,&ObservationSelection{meter_tracks:tracks,master_meter:true,analysis,meter_hz:20,analysis_hz:if self.subscription.enabled{10}else{0}}){
-                                self.output.event(&self.context(),"runtime",json!({"kind":"failure","failure":native_failure(error,"transport")}))?;
-                            }
-                        }else{
-                            self.output.event(&self.context(),"runtime",json!({"kind":"failure","failure":Failure::new("resource_budget","transport","Track metering requires a selection within the 1000-track limit")}))?;
-                        }
-                    }
+                    self.register_subscription()?;
                 }else if self.restart.as_ref().is_some_and(|r|r.ticket==ticket){
                     self.restart.take();if let Some(current)=self.current.as_mut(){
-                        let accepted=Arc::get_mut(current).ok_or_else(||anyhow::anyhow!("Accepted compilation has unexpected shared mutable plugin baseline"))?;
+                        // Export jobs keep their original accepted compilation immutable.
+                        let accepted=Arc::make_mut(current);
                         plugin_stamp.apply(&mut accepted.compiled.session);accepted.runtime_revision=ticket.revision;
                     }
+                    self.register_subscription()?;
                 }else{return Err(anyhow::anyhow!("Unowned native revision receipt"));}
             },
             NativeEvent::RevisionRejected{ticket,error}=>{
@@ -438,26 +571,29 @@ impl Coordinator {
                 if self.tail_pause==Some(ticket.operation){self.tail_pause=None;}
                 if let Some(mut control)=self.controls.remove(&ticket.operation.0){
                     if control.stop_seek{
-                        control.stop_seek=false;
-                        if control.cancel.load(Ordering::Relaxed)||self.runtime.is_none(){self.finish(&control.context,Err(Failure::new("cancelled","transport","Stop paused playback but was cancelled before rewind")))?;}
+                        control.stop_seek=false;control.paused=true;self.analysis.clear();self.analysis_clock=None;self.output.telemetry.lock().analysis=None;
+                        if control.cancel.load(Ordering::Relaxed)||self.runtime.is_none(){self.settle_control(control,Err(Failure::new("cancelled","transport","Stop paused playback but did not rewind: cancellation arrived between its receipts")),ticket.expected_revision)?;}
                         else if let Some(accepted)=&self.current{
-                            if accepted.runtime_revision!=ticket.expected_revision || transport.generation!=control.expected_generation {self.finish(&control.context,Err(Failure::new("stale_transport","transport","Transport changed while stopping")))?;}
+                            if accepted.runtime_revision!=ticket.expected_revision || transport.generation!=control.expected_generation {self.settle_control(control,Err(Failure::new("stale_transport","transport","Stop paused playback but did not rewind: transport changed")),ticket.expected_revision)?;}
                             else{
                                 let context=sources::context(accepted.assets.clone(),control.cancel.clone());
                                 match self.runtime.as_mut().unwrap().seek_ticks(&accepted.compiled.session,ticket.expected_revision,0,&context){
-                                    Ok(next)=>{self.controls.insert(next.operation.0,control);},Err(error)=>self.finish(&control.context,Err(native_failure(error,"transport")))?,
+                                    Ok(next)=>{self.controls.insert(next.operation.0,control);},Err(error)=>self.settle_control(control,Err(native_failure(error,"transport")),ticket.expected_revision)?,
                                 }
                             }
                         }
+                        else {self.settle_control(control,Err(Failure::new("stale_revision","transport","Stop paused playback but no accepted revision remains for rewind")),ticket.expected_revision)?;}
                     }else{
-                        if let Some(subscription)=control.subscription.take(){self.subscription=subscription;self.analysis.clear();self.output.telemetry.lock().analysis=None;}
-                        self.finish(&control.context,if control.void{Ok(Value::Null)}else{self.status(Some(transport))})?;
+                        if let Some(subscription)=control.subscription.take(){if !subscription.meters{self.meters=json!([]);}self.subscription=subscription;self.analysis.clear();self.analysis_clock=None;self.output.telemetry.lock().analysis=None;}
+                        if !transport.snapshot.running||matches!(action(&control.request).as_str(),"seek"|"loop"|"restart"|"panic") {self.analysis.clear();self.analysis_clock=None;self.output.telemetry.lock().analysis=None;}
+                        let result=if control.void{Ok(Value::Null)}else{self.status(Some(transport))};
+                        self.settle_control(control,result,ticket.expected_revision)?;
                     }
                 }
             },
             NativeEvent::ControlRejected{ticket,error,..}=>{
                 if self.tail_pause==Some(ticket.operation){self.tail_pause=None;}
-                if let Some(control)=self.controls.remove(&ticket.operation.0){self.finish(&control.context,Err(native_failure(error,"transport")))?;}
+                if let Some(control)=self.controls.remove(&ticket.operation.0){self.settle_control(control,Err(native_failure(error,"transport")),ticket.expected_revision)?;}
             },
             NativeEvent::PluginRestartRequested(request)=>self.restart_requested=Some(request),
             NativeEvent::OutputFault(error)=>{
@@ -469,27 +605,35 @@ impl Coordinator {
         }Ok(())
     }
     fn plugin_service(&mut self)->anyhow::Result<()> {
+        if !self.preview_frozen&&!self.boundary()&&self.controls.is_empty() {
         if let (Some(runtime),Some(current))=(&mut self.runtime,&self.current){
             if let Err(error)=runtime.service_plugins(&current.compiled.session,current.runtime_revision){
                 if error.code!=NativeErrorCode::Busy{self.output.event(&self.context(),"runtime",json!({"kind":"failure","failure":native_failure(error,"engine")}))?;}
             }
         }
-        if self.active.is_none()&&self.restart.is_none(){
+        }
+        if !self.preview_frozen&&self.active.is_none()&&self.restart.is_none()&&self.controls.is_empty()&&self.tail_pause.is_none(){
             if let (Some(request),Some(current),Some(runtime))=(self.restart_requested.take(),self.current.as_ref(),self.runtime.as_mut()){
                 if request.expected_revision==current.runtime_revision{
                     let context=sources::context(current.assets.clone(),Arc::new(AtomicBool::new(false)));
                     match runtime.prepare_plugin_restart(&current.compiled.session,current.runtime_revision,current.reference["sourceVersion"].as_u64().unwrap_or(0),&request,&context){
-                        Ok(prepared)=>{let ticket=prepared.ticket();self.restart=Some(Restart{prepared:Some(prepared),ticket});},
+                        Ok(prepared)=>{
+                            let ticket=prepared.ticket();let authorization=uuid::Uuid::new_v4().to_string();let request_id=uuid::Uuid::new_v4().to_string();
+                            let mut envelope=Context::host(self.epoch.clone(),self.project.clone());envelope.request_id=request_id.clone();
+                            envelope.revision=current.reference["revision"].as_str().map(str::to_owned);envelope.source_version=current.reference["sourceVersion"].as_u64();
+                            self.output.event(&envelope,"internal",json!({"kind":"prepared","requestId":request_id,"authorization":authorization,"snapshot":current.snapshot,"retained":true,"ref":current.reference,"dependencyVersions":current.dependencies}))?;
+                            self.restart=Some(Restart{prepared:Some(prepared),ticket,request:request_id,authorization,authorized:false});
+                        },
                         Err(error)=>self.output.event(&self.context(),"runtime",json!({"kind":"failure","failure":native_failure(error,"prepare")}))?,
                     }
                 }
             }
         }
-        if let Some(restart)=&mut self.restart{if let Some(prepared)=restart.prepared.take(){
+        if let Some(restart)=&mut self.restart{if restart.authorized {if let Some(prepared)=restart.prepared.take(){
             match self.runtime.as_mut().unwrap().submit_revision(prepared){Ok(_)=>{},Err(error)=>{
                 if error.error.code==NativeErrorCode::QueueFull{restart.prepared=Some(error.prepared);}else{self.restart.take();self.output.event(&self.context(),"runtime",json!({"kind":"failure","failure":native_failure(error.error,"apply")}))?;}
             }}
-        }}Ok(())
+        }}}Ok(())
     }
     fn export_event(&mut self,event:exports::ExportEvent)->anyhow::Result<()> {
         match event {
@@ -499,6 +643,7 @@ impl Coordinator {
     }
     fn service(&mut self)->anyhow::Result<()> {
         if let Some(runtime)=&mut self.runtime{let mut events:[Option<NativeEvent>;64]=std::array::from_fn(|_|None);runtime.poll(&mut events);for event in events.into_iter().flatten(){self.native_event(event)?;}}
+        self.resume_controls()?;
         loop{
             let result=match self.source.receiver.try_recv(){
                 Ok(result)=>result,Err(mpsc::TryRecvError::Empty)=>break,
@@ -507,9 +652,14 @@ impl Coordinator {
             match result{
             SourceResult::Build{id,result}=>self.compiled(id,result)?,
             SourceResult::Reply{context,result}=>{
+                if self.latest_scan.as_deref()==Some(context.request_id.as_str()){self.latest_scan=None;}
                 if self.pending.contains_key(&context.request_id){self.finish(&context,if self.token(&context.request_id).load(Ordering::Relaxed){Err(cancelled("compile"))}else{result})?;}
             },
-            SourceResult::Progress{context,snapshot,done,total}=>self.output.event(&context,"runtime",json!({"kind":"entries","requestId":context.request_id,"snapshot":snapshot,"done":done,"total":total}))?,
+            SourceResult::Progress{context,snapshot,done,total,current_entry,result}=>{
+                if self.latest_scan.as_deref()==Some(context.request_id.as_str())&&self.pending.contains_key(&context.request_id)&&!self.token(&context.request_id).load(Ordering::Relaxed) {
+                    self.output.event(&context,"runtime",json!({"kind":"entries","requestId":context.request_id,"snapshot":snapshot,"done":done,"total":total,"currentEntry":current_entry,"result":result}))?;
+                }
+            },
         }}
         if self.active.as_ref().is_some_and(|b|b.candidate.is_some()&&b.prepared.is_none()&&b.ticket.is_none()){
             let active=self.active.as_mut().unwrap();let id=active.request.context.request_id.clone();
@@ -518,6 +668,9 @@ impl Coordinator {
         }
         self.submit_build()?;self.plugin_service()?;
         if self.active.is_none()&&self.restart.is_none(){if let Some(request)=self.queued.take(){let context=request.context.clone();if let Err(failure)=self.start_build(request){self.finish(&context,Err(failure))?;}}}
+        if self.preview_waiter.is_some()&&self.active.is_none()&&self.restart.is_none()&&self.controls.is_empty()&&self.deferred.is_empty()&&self.desired_audition.is_none()&&self.desired_analysis.is_none()&&self.tail_pause.is_none() {
+            let context=self.preview_waiter.take().unwrap();let result=if self.token(&context.request_id).load(Ordering::Relaxed){Err(cancelled("project"))}else{Ok(Value::Null)};self.finish(&context,result)?;
+        }
         for event in self.exports.poll(){self.export_event(event)?;}
         if let (Some(runtime),Some(current))=(&mut self.runtime,&self.current){
             let transport=runtime.status().transport;
@@ -527,14 +680,17 @@ impl Coordinator {
             }
             let mut frames:[Option<ObservationFrame>;4]=std::array::from_fn(|_|None);runtime.drain_observations(&mut frames);
             for frame in frames.into_iter().flatten(){if frame.revision==current.runtime_revision{
-                self.meters=json!(frame.tracks.iter().map(|m|json!({"track":m.id,"peak":if frame.running{m.peak}else{0.},"rms":if frame.running{m.rms}else{0.}})).collect::<Vec<_>>());
-                if !frame.mono_samples.is_empty(){self.analysis.submit(current.reference.clone(),frame);}
+                if frame.meters_present {self.meters=json!(frame.tracks.iter().map(|m|json!({"track":m.id,"peak":if frame.running{m.peak}else{0.},"rms":if frame.running{m.rms}else{0.}})).collect::<Vec<_>>());}
+                let clock=(frame.transport_generation,frame.capture_epoch);
+                if self.analysis_clock!=Some(clock){self.analysis.clear();self.output.telemetry.lock().analysis=None;self.analysis_clock=Some(clock);}
+                if self.subscription.detail&&frame.running&&!frame.mono_samples.is_empty(){self.analysis.submit(current.reference.clone(),frame);}
             }}
         }
         while let Some(frame)=self.analysis.poll(){
-            if self.subscription.enabled && self.current.as_ref().is_some_and(|a|a.reference==frame["ref"])
+            if self.subscription.detail && self.current.as_ref().is_some_and(|a|a.reference==frame["ref"])
                 && frame["source"].as_str()==self.subscription.source.as_deref()
-                && self.runtime.as_ref().is_some_and(|r|frame["generation"]==r.status().transport.generation.to_string()){
+                && self.analysis_clock.is_some_and(|(generation,capture)|frame["generation"]==generation.to_string()&&frame["captureId"]==capture.to_string())
+                && self.runtime.as_ref().is_some_and(|r|r.status().transport.snapshot.running&&frame["generation"]==r.status().transport.generation.to_string()){
                 self.output.telemetry(&self.context(),json!({"kind":"analysis","frame":frame}))?;
             }
         }
@@ -556,7 +712,9 @@ impl Coordinator {
         let pending:Vec<_>=self.pending.values().filter(|c|c.project==old).cloned().collect();
         for context in pending{self.finish(&context,Err(cancelled("engine")))?;}
         self.current=None;self.previous=None;self.final_status=None;self.meters=json!([]);self.subscription=Subscription::default();self.analysis.clear();
+        self.deferred.clear();self.desired_audition=None;self.desired_analysis=None;self.latest_scan=None;self.analysis_clock=None;
         self.tail_pause=None;
+        self.preview_waiter=None;self.preview_frozen=false;
         self.uploads.clear();self.snapshots.clear();self.snapshot_order.clear();
         let mut telemetry=self.output.telemetry.lock();telemetry.status=None;telemetry.analysis=None;
         Ok(())
@@ -611,6 +769,7 @@ pub fn run(mut reader:File,mut writer:File)->anyhow::Result<()> {
     let writer_thread=std::thread::spawn(move||->std::io::Result<()>{
         let mut sequence=0u64;
         loop{match frames.recv_timeout(Duration::from_millis(5)){Ok(frame)=>write_ordered(&mut writer,&mut sequence,frame)?,Err(mpsc::RecvTimeoutError::Disconnected)=>break,Err(mpsc::RecvTimeoutError::Timeout)=>{}}
+            while let Ok(frame)=frames.try_recv(){write_ordered(&mut writer,&mut sequence,frame)?;}
             let (status,analysis)={let mut t=writer_telemetry.lock();(t.status.take(),t.analysis.take())};
             if let Some(frame)=status{write_ordered(&mut writer,&mut sequence,frame)?;}if let Some(frame)=analysis{write_ordered(&mut writer,&mut sequence,frame)?;}
         }Ok(())
@@ -662,8 +821,37 @@ fn engine_failure(error:anyhow::Error)->Failure{Failure::new("child_died","engin
 fn string<'a>(value:&'a Value,key:&str)->Result<&'a str,Failure>{value[key].as_str().ok_or_else(||invalid(format!("Missing string field {key}")))}
 fn tick(value:&Value)->Result<u64,Failure>{let text=value.as_str().ok_or_else(||invalid("Tick must be an unsigned decimal string"))?;if text.is_empty()||(text.len()>1&&text.starts_with('0'))||!text.bytes().all(|c|c.is_ascii_digit()){return Err(invalid("Tick must be a canonical unsigned decimal string"));}text.parse().map_err(|_|invalid("Tick overflows u64"))}
 fn native_failure(error:NativeError,phase:&str)->Failure{
-    let code=match error.code{NativeErrorCode::Cancelled|NativeErrorCode::Superseded=>"cancelled",NativeErrorCode::StaleRevision|NativeErrorCode::SessionMismatch=>"stale_revision",NativeErrorCode::Busy|NativeErrorCode::QueueFull=>"queue_full",NativeErrorCode::ResourceLimit|NativeErrorCode::RevisionOverflow=>"resource_budget",NativeErrorCode::AudioUnavailable=>"audio_unavailable",NativeErrorCode::OutputFault=>"output_fault",NativeErrorCode::UnknownOperation=>"stale_request",NativeErrorCode::Shutdown=>"child_died",_=>"invalid_source"};
-    sources::diagnostic_failure(Failure::new(code,phase,error.message),error.diagnostic.as_ref())
+    let code=match error.code{NativeErrorCode::Cancelled=>"cancelled",NativeErrorCode::Superseded=>"superseded",NativeErrorCode::StaleRevision=>"stale_revision",NativeErrorCode::SessionMismatch=>"session_mismatch",NativeErrorCode::Busy|NativeErrorCode::QueueFull=>"queue_full",NativeErrorCode::ResourceLimit|NativeErrorCode::RevisionOverflow=>"resource_budget",NativeErrorCode::AudioUnavailable=>"audio_unavailable",NativeErrorCode::OutputFault=>"output_fault",NativeErrorCode::UnknownOperation=>"stale_request",NativeErrorCode::Shutdown=>"child_died",_=>"invalid_source"};
+    let runtime=json!({"code":format!("{:?}",error.code),"expectedRevision":error.expected_revision.map(|revision|revision.to_string()),"observedRevision":error.observed_revision.map(|revision|revision.to_string())});
+    let mut failure=sources::diagnostic_failure(Failure::new(code,phase,error.message),error.diagnostic.as_ref());failure.runtime=Some(runtime);failure
+}
+fn counter_fields(mut value:Value,fields:&[&str])->Value{
+    for field in fields{if let Some(counter)=value[*field].as_u64(){value[*field]=json!(counter.to_string());}}value
+}
+fn dependency_manifest(assets:&sources::PinnedAssets)->Result<Vec<Value>,Failure> {
+    let mut unique=BTreeMap::new();
+    for dependency in assets.dependencies() {
+        let key=(string(&dependency,"grant")?.to_owned(),string(&dependency,"path")?.to_owned());
+        if let Some(previous)=unique.insert(key,dependency.clone()) {if previous!=dependency{return Err(Failure::new("changed_asset","prepare","Source and asset capture disagree about one dependency"));}}
+        if unique.len()>8192{return Err(Failure::new("resource_budget","prepare","Dependency manifest exceeds the consumed-file budget"));}
+    }
+    Ok(unique.into_values().collect())
+}
+fn action(request:&PrivateRequest)->String {
+    match request.command.as_str() {
+        "transport"=>request.args["command"]["kind"].as_str().unwrap_or("project").to_owned(),
+        "setAudition"=>"audition".into(),"setAnalysisSubscription"=>"analysis".into(),"rebuild"=>"rebuild".into(),
+        "checkEntries"=>"classifyEntries".into(),"startExport"=>"export".into(),"format"=>"format".into(),
+        "inspect"|"explain"|"location"|"diff"=>"inspect".into(),_=>"project".into(),
+    }
+}
+fn global_control(request:&PrivateRequest)->bool {request.command=="transport"&&matches!(request.args["command"]["kind"].as_str(),Some("play"|"pause"|"stop"|"panic"))}
+fn subscription(args:&Value)->Result<Subscription,Failure> {
+    let args=&args["subscription"];
+    let detail=args["detail"].as_bool().ok_or_else(||invalid("Missing detail flag"))?;
+    let meters=args["meters"].as_bool().ok_or_else(||invalid("Missing meters flag"))?;
+    let rate=|key:&str,max:u64,enabled:bool|args[key].as_u64().filter(|rate|*rate<=max&&(!enabled||*rate>0)).map(|rate|rate as u8).ok_or_else(||invalid(format!("Invalid {key}")));
+    Ok(Subscription{detail,meters,detail_hz:rate("detailHz",30,detail)?,meter_hz:rate("meterHz",20,meters)?,source:args["source"].as_str().map(str::to_owned)})
 }
 
 #[cfg(test)]
@@ -687,6 +875,112 @@ mod tests{
         }
         drop(pending);
         assert!(output.telemetry(&Context::host(Some("other".into()),context.project),json!({"kind":"status","status":{"ref":reference}})).is_err());
+    }
+    #[test]
+    fn reliable_acceptance_barrier_discards_older_coalesced_telemetry(){
+        let (reliable,receiver)=mpsc::sync_channel(1);
+        let pending=Arc::new(Mutex::new(Telemetry{status:None,analysis:None,dropped:0}));
+        let mut output=Output{reliable,telemetry:pending.clone(),sequence:0};
+        let context=Context::host(Some("engine".into()),Some(ProjectRef{project:"project".into(),epoch:"epoch".into()}));
+        let reference=json!({"project":"project","epoch":"epoch","engineEpoch":"engine","sourceVersion":7,"revision":"accepted"});
+        output.telemetry(&context,json!({"kind":"status","status":{"ref":reference}})).unwrap();
+        output.telemetry(&context,json!({"kind":"analysis","frame":{"ref":reference,"dropped":"0"}})).unwrap();
+        output.event(&context,"runtime",json!({"kind":"build","phase":"accepted","ref":reference})).unwrap();
+        assert!(pending.lock().status.is_none());assert!(pending.lock().analysis.is_none());
+        assert_eq!(receiver.recv().unwrap()["barrier"],true);
+    }
+    #[test]
+    fn health_counters_never_round_trip_through_javascript_numbers(){
+        let value=counter_fields(json!({"callback_count":u64::MAX,"rate":48000}),&["callback_count"]);
+        assert_eq!(value["callback_count"],"18446744073709551615");assert_eq!(value["rate"],48000);
+    }
+    #[test]
+    fn desired_controls_are_latest_wins_while_explicit_controls_remain_bounded_and_ordered(){
+        let (reliable,receiver)=mpsc::sync_channel(4);
+        let output=Output{reliable,telemetry:Arc::new(Mutex::new(Telemetry{status:None,analysis:None,dropped:0})),sequence:0};
+        let mut coordinator=Coordinator::new(output,Arc::new(Mutex::new(HashMap::new())),Arc::new(Mutex::new(VecDeque::new())));
+        let request=|id:&str,command:&str,args:Value|{let mut context=Context::host(Some("engine".into()),Some(ProjectRef{project:"project".into(),epoch:"epoch".into()}));context.request_id=id.into();PrivateRequest{context,command:command.into(),args}};
+        let first=request("first","setAudition",json!({"ref":null,"state":{}}));
+        coordinator.pending.insert(first.context.request_id.clone(),first.context.clone());coordinator.defer_control(first).unwrap();
+        coordinator.defer_control(request("latest","setAudition",json!({"ref":null,"state":{}}))).unwrap();
+        let failure=receiver.recv().unwrap();assert_eq!(failure["failure"]["operation"]["action"],"audition");assert_eq!(failure["failure"]["operation"]["outcome"],"superseded");
+        assert_eq!(coordinator.desired_audition.as_ref().unwrap().context.request_id,"latest");assert!(!coordinator.pending.contains_key("first"));
+        for index in 0..Coordinator::DEFERRED_CONTROL_LIMIT{coordinator.defer_control(request(&index.to_string(),"transport",json!({"command":{"kind":"play"}}))).unwrap();}
+        assert_eq!(coordinator.deferred.front().unwrap().context.request_id,"0");assert_eq!(coordinator.deferred.back().unwrap().context.request_id,(Coordinator::DEFERRED_CONTROL_LIMIT-1).to_string());
+        assert_eq!(coordinator.defer_control(request("overflow","transport",json!({"command":{"kind":"pause"}}))).unwrap_err().code,"queue_full");
+        assert!(global_control(&request("stop","transport",json!({"command":{"kind":"stop"}}))));
+        assert!(!global_control(&request("seek","transport",json!({"command":{"kind":"seek","tick":"0"}}))));
+        let partial=coordinator.action_failure(&request("stop","transport",json!({"ref":null,"command":{"kind":"stop"}})),cancelled("transport"),true,Some(u64::MAX));
+        assert_eq!(partial.operation.as_ref().unwrap()["outcome"],"partial");assert_eq!(partial.operation.as_ref().unwrap()["expectedRuntimeRevision"],"18446744073709551615");
+        coordinator.source.shutdown();
+    }
+    #[test]
+    fn cancelled_deferred_head_cannot_allow_later_play_to_pass_stop(){
+        let (reliable,receiver)=mpsc::sync_channel(4);
+        let output=Output{reliable,telemetry:Arc::new(Mutex::new(Telemetry{status:None,analysis:None,dropped:0})),sequence:0};
+        let mut coordinator=Coordinator::new(output,Arc::new(Mutex::new(HashMap::new())),Arc::new(Mutex::new(VecDeque::new())));
+        let request=|id:&str,kind:&str|{let mut context=Context::host(Some("engine".into()),Some(ProjectRef{project:"project".into(),epoch:"epoch".into()}));context.request_id=id.into();PrivateRequest{context,command:"transport".into(),args:json!({"ref":null,"command":{"kind":kind}})}};
+        let head=request("cancelled","seek");
+        coordinator.pending.insert(head.context.request_id.clone(),head.context.clone());
+        coordinator.control(head).unwrap();coordinator.control(request("stop","stop")).unwrap();
+        coordinator.token("cancelled").store(true,Ordering::Relaxed);
+        coordinator.resume_controls().unwrap();
+        assert_eq!(receiver.recv().unwrap()["failure"]["operation"]["outcome"],"cancelled");
+        coordinator.control(request("later-play","play")).unwrap();
+        assert_eq!(coordinator.deferred.iter().map(|request|request.context.request_id.as_str()).collect::<Vec<_>>(),["stop","later-play"]);
+        coordinator.source.shutdown();
+    }
+    #[test]
+    fn incoming_analysis_replaces_older_desired_state_without_a_receipt_boundary(){
+        let (reliable,receiver)=mpsc::sync_channel(4);
+        let output=Output{reliable,telemetry:Arc::new(Mutex::new(Telemetry{status:None,analysis:None,dropped:0})),sequence:0};
+        let mut coordinator=Coordinator::new(output,Arc::new(Mutex::new(HashMap::new())),Arc::new(Mutex::new(VecDeque::new())));
+        let request=|id:&str,detail:bool|{let mut context=Context::host(Some("engine".into()),Some(ProjectRef{project:"project".into(),epoch:"epoch".into()}));context.request_id=id.into();PrivateRequest{context,command:"setAnalysisSubscription".into(),args:json!({"ref":null,"subscription":{"detail":detail}})}};
+        let old=request("old",false);coordinator.pending.insert(old.context.request_id.clone(),old.context.clone());
+        coordinator.control(old).unwrap();coordinator.control(request("latest",true)).unwrap();
+        assert_eq!(receiver.recv().unwrap()["failure"]["operation"]["outcome"],"superseded");
+        assert_eq!(coordinator.desired_analysis.as_ref().unwrap().context.request_id,"latest");
+        coordinator.source.shutdown();
+    }
+    #[test]
+    fn same_project_configuration_cannot_clear_imported_preview_freeze(){
+        let (reliable,_receiver)=mpsc::sync_channel(4);
+        let output=Output{reliable,telemetry:Arc::new(Mutex::new(Telemetry{status:None,analysis:None,dropped:0})),sequence:0};
+        let mut coordinator=Coordinator::new(output,Arc::new(Mutex::new(HashMap::new())),Arc::new(Mutex::new(VecDeque::new())));
+        let context=Context::host(Some("engine".into()),Some(ProjectRef{project:"project".into(),epoch:"epoch".into()}));
+        let configuration=PrivateRequest{context:context.clone(),command:"configureProject".into(),args:json!({"project":context.project,"trustedRead":true,"readBindings":[]})};
+        coordinator.dispatch(configuration.clone()).unwrap();
+        coordinator.dispatch(PrivateRequest{context:context.clone(),command:"preparePreview".into(),args:json!({})}).unwrap();
+        coordinator.dispatch(configuration.clone()).unwrap();assert!(coordinator.preview_frozen);
+        assert_eq!(coordinator.dispatch(PrivateRequest{context:context.clone(),command:"checkEntries".into(),args:json!({})}).unwrap_err().code,"trust_required");
+        coordinator.dispatch(PrivateRequest{context:context.clone(),command:"resumeProject".into(),args:json!({})}).unwrap();assert!(!coordinator.preview_frozen);
+        coordinator.preview_frozen=true;
+        let mut replacement=configuration;replacement.args["project"]=json!({"project":"replacement","epoch":"other"});
+        coordinator.dispatch(replacement).unwrap();assert!(!coordinator.preview_frozen);
+        coordinator.source.shutdown();
+    }
+    #[test]
+    fn imported_preview_rejects_score_mutation_before_queue_admission_but_keeps_global_controls(){
+        let (reliable,_receiver)=mpsc::sync_channel(4);
+        let output=Output{reliable,telemetry:Arc::new(Mutex::new(Telemetry{status:None,analysis:None,dropped:0})),sequence:0};
+        let mut coordinator=Coordinator::new(output,Arc::new(Mutex::new(HashMap::new())),Arc::new(Mutex::new(VecDeque::new())));
+        coordinator.preview_frozen=true;
+        let request=|command:&str,kind:&str|PrivateRequest{
+            context:Context::host(Some("engine".into()),Some(ProjectRef{project:"project".into(),epoch:"epoch".into()})),
+            command:command.into(),args:json!({"ref":null,"command":{"kind":kind}})};
+        for kind in ["seek","loop","restart"]{
+            assert_eq!(coordinator.control(request("transport",kind)).unwrap_err().code,"trust_required");
+        }
+        assert_eq!(coordinator.control(request("setAudition","")).unwrap_err().code,"trust_required");
+        assert!(coordinator.deferred.is_empty());assert!(coordinator.desired_audition.is_none());
+        for kind in ["play","pause","stop","panic"]{coordinator.control(request("transport",kind)).unwrap();}
+        coordinator.control(request("setAnalysisSubscription","")).unwrap();
+        assert_eq!(coordinator.deferred.len(),4);assert!(coordinator.desired_analysis.is_some());
+        coordinator.preview_frozen=false;
+        coordinator.control(request("transport","seek")).unwrap();
+        coordinator.control(request("setAudition","")).unwrap();
+        assert_eq!(coordinator.deferred.len(),5);assert!(coordinator.desired_audition.is_some());
+        coordinator.source.shutdown();
     }
     #[test]
     fn ticks_are_lossless_canonical_unsigned_integers(){

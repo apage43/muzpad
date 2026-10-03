@@ -2,7 +2,8 @@ use crate::protocol::{Failure, SOURCE_DOCUMENT_BYTES, SOURCE_SNAPSHOT_BYTES};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::{BTreeMap, BTreeSet}, sync::Arc};
-use super::secure_fs::{validate_path, Root};
+use super::secure_fs::Root;
+use crate::protocol::validate_path;
 
 pub const SETTINGS: &str = "muzpad.json";
 pub const MAX_FILES: usize = 8192;
@@ -107,6 +108,7 @@ impl Buffer {
 pub struct Workspace {
     pub project: String, pub epoch: String, pub root: Arc<Root>, pub persisted: bool,
     pub gist: Option<String>,
+    pub trusted: bool,
     pub settings: Settings, pub settings_base: Option<String>, pub settings_version: Option<String>,
     pub settings_conflict: Option<Value>, pub source_version: u64, pub disk_generation: u64,
     pub files: BTreeMap<String, Buffer>, pub resources: Vec<Value>,
@@ -121,7 +123,7 @@ impl Workspace {
     pub fn settings_dirty(&self) -> bool { self.settings_base.as_ref().and_then(|s| serde_json::from_str::<Settings>(s).ok()).as_ref() != Some(&self.settings) }
     pub fn dirty(&self) -> bool { self.settings_dirty() || self.files.values().any(Buffer::dirty) || self.resources.iter().any(|r| r["pendingSave"] == true) }
     pub fn conflicts(&self) -> Vec<Value> { self.files.values().filter_map(|f| f.conflict.clone()).chain(self.settings_conflict.clone()).collect() }
-    pub fn snapshot(&self) -> Value { with_gist(json!({"project":self.project,"epoch":self.epoch,"title":self.settings.title,"entry":self.settings.entry,"entries":self.settings.entries(),"sourceVersion":self.source_version,"diskGeneration":self.disk_generation.to_string(),"settingsDiskVersion":self.settings_version,"files":self.files.values().map(Buffer::dto).collect::<Vec<_>>(),"resources":self.resources.iter().map(public_resource).collect::<Vec<_>>(),"conflicts":self.conflicts(),"dirty":self.dirty(),"rootLabel":self.root_label()}), self.gist.as_deref()) }
+    pub fn snapshot(&self) -> Value { with_gist(json!({"project":self.project,"epoch":self.epoch,"title":self.settings.title,"entry":self.settings.entry,"entries":self.settings.entries(),"sourceVersion":self.source_version,"diskGeneration":self.disk_generation.to_string(),"settingsDiskVersion":self.settings_version,"files":self.files.values().map(Buffer::dto).collect::<Vec<_>>(),"resources":self.resources.iter().map(public_resource).collect::<Vec<_>>(),"conflicts":self.conflicts(),"dirty":self.dirty(),"rootLabel":self.root_label(),"execution":{"trusted":self.trusted,"policy":if self.trusted{"account-native"}else{"preview"}}}), self.gist.as_deref()) }
     pub fn working_capture(&self) -> WorkingCapture { WorkingCapture { project:self.project.clone(),epoch:self.epoch.clone(),source_version:self.source_version,entry:self.settings.entry.clone(),expected_disk_generation:self.disk_generation.to_string(),buffers:self.files.values().map(Buffer::capture).collect(),settings:self.settings.clone(),settings_disk_version:self.settings_version.clone() } }
     pub fn assert_ref(&self, project: &str, epoch: &str) -> Result<(), Failure> { if self.project != project || self.epoch != epoch { Err(failure("stale_request", "Project identity has expired")) } else { Ok(()) } }
     pub fn acknowledge(&mut self, capture: &WorkingCapture) -> Result<(), Failure> {

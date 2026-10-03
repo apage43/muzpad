@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { clickCommand, openCommandMenu } from "./commands";
 const id = "a".repeat(32);
 const gist = {
   description: "Gist piece",
@@ -45,6 +46,7 @@ test("URL gist fetches updated source on reload and keeps local edits in Previou
     "href",
     `https://gist.github.com/${id}`,
   );
+  await openCommandMenu(page, "#view-gist");
   await expect(page.locator("#view-gist")).toBeVisible();
   await expect(page.locator("#download")).toBeHidden();
   await page.locator(".cm-content").click();
@@ -69,10 +71,10 @@ test("URL gist fetches updated source on reload and keeps local edits in Previou
   await expect(page.locator("#build-state")).toHaveText("Accepted");
   await expect(page.locator(".cm-content")).toContainText("local edit");
   expect(requests).toBe(2);
-  await page.locator("#new-project").click();
+  await clickCommand(page, "#new-project");
   await page.locator("#workflow-dialog").getByRole("button", { name: "Discard", exact: true }).click();
   await expect(page).not.toHaveURL(/gist=/);
-  await expect(page.locator("#download")).toBeVisible();
+  await expect(page.locator("#download")).toBeAttached();
   await expect(page.locator("#view-gist")).toBeHidden();
   await page.getByRole("button", { name: "Previous workspace" }).click();
   await page.locator("#workflow-dialog").getByRole("button", { name: "Restore", exact: true }).click();
@@ -128,8 +130,7 @@ test("a failed URL gist request never falls back to the matching cached draft", 
     route.fulfill({ status: 404, body: "{}" }),
   );
   await page.goto(`./?gist=${id}`);
-  await expect(page.locator("#build-state")).toHaveText("Needs attention");
-  await expect(page.locator("#diagnostic-list")).toContainText("not found");
+  await expect(page.locator("#workflow-status")).toContainText("not found");
   await expect(page).toHaveURL(new RegExp(`gist=${id}`));
   await expect(page.locator("#project-title")).not.toHaveText("Cached gist");
   await expect(page.locator(".cm-content")).not.toContainText(
@@ -153,7 +154,7 @@ test("gist import errors preserve work; sidebar links open gists and show the ac
   );
   await page.goto("./");
   await expect(page.locator("#build-state")).toHaveText("Accepted");
-  await page.locator("#import-gist").click();
+  await clickCommand(page, "#import-gist");
   await page.locator("#gist-input").fill(id);
   await page.locator("#gist-submit").click();
   await expect(page.locator("#gist-error")).toContainText("not found");
@@ -186,12 +187,14 @@ test("canceling an in-flight import keeps the current workspace", async ({
   });
   await page.goto("./");
   await expect(page.locator("#build-state")).toHaveText("Accepted");
-  await page.locator("#import-gist").click();
+  await clickCommand(page, "#import-gist");
   await page.locator("#gist-input").fill(id);
   await page.locator("#gist-submit").click();
-  await expect(page.locator("#build-state")).toHaveText("Loading gist");
+  await expect(page.locator("#workflow-status")).toContainText("Fetching source from GitHub");
+  await expect(page.locator("#build-state")).toHaveText("Accepted");
   await page.locator("#gist-cancel").click();
-  await expect(page.locator("#build-state")).toHaveText("Import canceled");
+  await expect(page.locator("#workflow-status")).toContainText("Cancelled; your current workspace is unchanged");
+  await expect(page.locator("#build-state")).toHaveText("Accepted");
   release();
   await expect(page.locator("#project-title")).toHaveText("Untitled project");
   await expect(page).not.toHaveURL(/gist=/);

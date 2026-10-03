@@ -14,7 +14,7 @@ export default defineConfig({
         browserName: "chromium",
         launchOptions: {
           executablePath: process.env.CHROMIUM_PATH,
-          args: ["--no-sandbox"],
+          args: ["--no-sandbox", "--mute-audio"],
         },
       },
     },

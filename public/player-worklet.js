@@ -16,6 +16,17 @@ class MuzPlayer extends AudioWorkletProcessor {
     this.source = null;
     this.primed = false;
     this.analysis = null;
+    this.analysisEnabled = false;
+    this.analysisCaptureId = null;
+    this.monitorSamples = 0;
+    this.monitorReady = false;
+    this.monitorDirty = false;
+    this.monitorGeneration = 0;
+    this.monitorLastBeat = null;
+    this.consumedMeters = [];
+    this.meterEpoch = 0;
+    this.meterRevision = 0;
+    this.metersEnabled = true;
     this.port.onmessage = ({ data }) => {
       if (data.type === "connect") {
         if (this.source) this.source.close();
@@ -25,14 +36,60 @@ class MuzPlayer extends AudioWorkletProcessor {
         this.primed = false;
         this.source = data.port;
         this.source.onmessage = ({ data }) => this.receive(data);
+        this.invalidateMonitor(); this.publishMonitor();
+        this.consumedMeters = [];
+        this.status.meters = [];
       }
-      if (data.type === "playing") this.playing = data.value;
-      if (data.type === "analysis") this.analysis = data.id;
+      if (data.type === "playing") {
+        this.playing = data.value;
+        if (!this.playing) { this.invalidateMonitor(); this.publishMonitor(); }
+      }
+      if (data.type === "meters") {
+        this.metersEnabled = data.enabled === true;
+        if (!this.metersEnabled) {
+          this.consumedMeters = [];
+          this.status.meters = [];
+        }
+      }
+      if (data.type === "analysis") {
+        if (this.analysis !== data.id || this.analysisEnabled !== (data.enabled === true) ||
+            this.analysisCaptureId !== data.captureId) {
+          this.analysis = data.id;
+          this.analysisEnabled = data.enabled === true;
+          this.analysisCaptureId = data.captureId;
+          this.invalidateMonitor();
+          this.monitorDirty = true;
+          this.publishMonitor();
+        }
+      }
     };
+  }
+  invalidateMonitor() {
+    this.monitorSamples = 0;
+    this.monitorLastBeat = null;
+    if (this.monitorReady) {
+      this.monitorReady = false;
+      this.monitorDirty = true;
+    }
+  }
+  publishMonitor() {
+    const ready = this.playing && this.analysisEnabled && this.monitorSamples >= 2048;
+    if (ready !== this.monitorReady) {
+      this.monitorReady = ready;
+      this.monitorDirty = true;
+    }
+    if (!this.monitorDirty || this.analysisCaptureId === null) return;
+    this.monitorDirty = false;
+    this.port.postMessage({type:"analysisReady",captureId:this.analysisCaptureId,
+      source:this.analysis,epoch:this.epoch,revision:this.acceptedRevision,
+      generation:this.monitorGeneration,ready});
   }
   receive(data) {
     if (data.type === "revision" && data.epoch === this.epoch) {
       this.acceptedRevision = data.revision;
+      this.invalidateMonitor(); this.publishMonitor();
+      this.consumedMeters = [];
+      this.status.meters = [];
       // When paused/full, do not synthesize uncredited transition blocks. Fade
       // the queued boundary and first new block without discarding held state.
       if (data.queuedFade) {
@@ -52,6 +109,11 @@ class MuzPlayer extends AudioWorkletProcessor {
       this.primed = false;
       this.underruns = 0;
       this.starved = false;
+      this.invalidateMonitor(); this.publishMonitor();
+      this.consumedMeters = [];
+      this.status.meters = [];
+      this.meterEpoch = this.epoch;
+      this.meterRevision = this.acceptedRevision;
       this.port.postMessage({
         type: "position",
         ...this.status,
@@ -89,6 +151,7 @@ class MuzPlayer extends AudioWorkletProcessor {
     if (!left || !right) return true;
     if (!this.playing) {
       this.gain = 0;
+      this.invalidateMonitor(); this.publishMonitor();
       return true;
     }
     if (!this.primed) {
@@ -105,9 +168,21 @@ class MuzPlayer extends AudioWorkletProcessor {
         if (!this.starved) this.underruns++;
         this.starved = true;
         this.gain = 0;
+        this.invalidateMonitor();
         break;
       }
       this.starved = false;
+      if (this.offset === 0) {
+        if (this.meterEpoch !== item.epoch || this.meterRevision !== item.revision) {
+          this.consumedMeters = [];
+          this.meterEpoch = item.epoch; this.meterRevision = item.revision;
+        }
+        if (this.metersEnabled && Array.isArray(item.meta.meters)) this.consumedMeters = item.meta.meters;
+        const generation = item.meta.status.generation ?? 0;
+        if (generation !== this.monitorGeneration ||
+            (this.monitorLastBeat !== null && item.meta.startBeat < this.monitorLastBeat)) this.invalidateMonitor();
+        this.monitorGeneration = generation;
+      }
       this.gain = Math.min(1, this.gain + 1 / (sampleRate * 0.005));
       const phase = this.offset / Math.max(1, item.meta.frames - 1);
       const gain =
@@ -115,11 +190,15 @@ class MuzPlayer extends AudioWorkletProcessor {
       left[i] = item.audio[this.offset * 2] * gain;
       right[i] = item.audio[this.offset * 2 + 1] * gain;
       const monitor = outputs[1];
-      if (monitor && item.analysis === this.analysis) {
+      if (monitor && this.analysisEnabled && item.analysis === this.analysis &&
+          item.epoch === this.epoch && item.revision === this.acceptedRevision &&
+          item.meta.status.beat >= item.meta.startBeat) {
         const start = item.meta.frames * 2;
         monitor[0][i] = item.audio[start + this.offset * 2] * gain;
         monitor[1][i] = item.audio[start + this.offset * 2 + 1] * gain;
+        this.monitorSamples = Math.min(2048,this.monitorSamples + 1);
       }
+      else this.invalidateMonitor();
       this.offset++;
       const end = item.meta.status;
       if (i === left.length - 1) {
@@ -133,16 +212,18 @@ class MuzPlayer extends AudioWorkletProcessor {
           ...end,
           beat: item.meta.startBeat + (endBeat - item.meta.startBeat) * f,
           seconds: item.meta.startSeconds + this.offset / sampleRate,
-          meters: item.meta.meters,
+          meters: this.consumedMeters,
         };
       }
       if (this.offset === item.meta.frames) {
         this.queue.shift();
         this.offset = 0;
-        this.status = { ...end, meters: item.meta.meters };
+        this.status = { ...end, meters: this.consumedMeters };
+        this.monitorLastBeat = end.beat;
         this.recycle(item);
         if (end.done && (end.revision ?? 0) >= this.acceptedRevision) {
           this.playing = false;
+          this.invalidateMonitor();
           this.port.postMessage({
             type: "ended",
             ...this.status,
@@ -152,6 +233,7 @@ class MuzPlayer extends AudioWorkletProcessor {
         }
       }
     }
+    this.publishMonitor();
     this.framesSinceReport += left.length;
     if (this.framesSinceReport >= 2048) {
       this.framesSinceReport = 0;

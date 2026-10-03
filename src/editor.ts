@@ -3,6 +3,7 @@ import {
   EditorSelection,
   Compartment,
   Prec,
+  countColumn,
   type StateEffect,
   type Extension,
 } from "@codemirror/state";
@@ -12,6 +13,7 @@ import {
   StreamLanguage,
   syntaxHighlighting,
   HighlightStyle,
+  foldService,
 } from "@codemirror/language";
 import { tags } from "@lezer/highlight";
 import { isDarkTheme } from "./theme";
@@ -57,6 +59,7 @@ export class SourceEditor {
   extensions: Extension[];
   readonly = new Compartment();
   appearance = new Compartment();
+  accessibility = new Compartment();
   suppress = false;
   states = new Map<
     string,
@@ -77,8 +80,23 @@ export class SourceEditor {
       ),
       basicSetup,
       muz,
+      foldService.of((state, lineStart, lineEnd) => {
+        const line = state.doc.lineAt(lineStart);
+        const whitespace = line.text.search(/\S/);
+        if (whitespace < 0) return null;
+        const indent = countColumn(line.text, state.tabSize, whitespace);
+        let end = lineEnd;
+        for (let number = line.number + 1; number <= state.doc.lines; number++) {
+          const next = state.doc.line(number), prefix = next.text.search(/\S/);
+          if (prefix < 0) continue;
+          if (countColumn(next.text, state.tabSize, prefix) <= indent) break;
+          end = next.to;
+        }
+        return end > lineEnd ? { from: lineEnd, to: end } : null;
+      }),
       syntaxHighlighting(palette),
       this.readonly.of(EditorState.readOnly.of(false)),
+      this.accessibility.of(EditorView.contentAttributes.of({ "aria-label": "Source editor · no file open" })),
       Prec.highest(
         keymap.of([
           {
@@ -202,6 +220,10 @@ export class SourceEditor {
       );
       this.view.dispatch({
         effects: [
+          this.accessibility.reconfigure(EditorView.contentAttributes.of({
+            "aria-label": `${readOnly ? "Read-only source" : "Source editor"} · ${path.slice(path.indexOf(":") + 1)}`,
+            "aria-readonly": String(readOnly),
+          })),
           this.readonly.reconfigure([
             EditorState.readOnly.of(readOnly),
             EditorView.editable.of(!readOnly),

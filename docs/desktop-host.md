@@ -14,12 +14,15 @@ revision from `src-tauri/core-revision` and require protocol version 1.
 
 ## Project and revision authority
 
-Project IDs and epochs bind canonical roots; selecting an external folder grants
-read access only, and export dialogs grant one staged destination. Editable
-project buffers, including closed/new/deleted files, are captured at one
-sourceVersion. Clean imported dependencies retain disk versions. Before apply,
-the parent validates source/dependency authority; watcher notifications never
-trigger compilation or stand in for an immutable snapshot.
+Project IDs and epochs bind canonical roots. Deliberately opened local projects
+use the logged-in account's ordinary read authority; reads are demand-loaded from
+consumed modules/assets rather than recursively capturing granted library trees.
+Editable buffers, including closed/new/deleted files, are captured at one
+sourceVersion and override disk fallback. Canonical targets and actual symlink
+edges remain dependency identities. Before apply, the parent validates the exact
+consumed source/resource authorization; watcher notifications never trigger
+compilation or stand in for an immutable snapshot. Special files are rejected
+before bounded nonblocking regular-file reads, so FIFOs cannot stall capture.
 
 Source navigation resolves canonical editable file IDs or authorized readonly
 documents, never basename guesses or new grants. Reads, snapshots and archive
@@ -31,24 +34,36 @@ overwriting them. Clean external changes refresh without rebuilding; dirty
 changes preserve base/local/disk conflicts for explicit resolution.
 
 The child promotes candidates only on authoritative native applied receipts.
-Rejection preserves the previous accepted audio/inspection revision. Transport,
-inspection and telemetry carry exact accepted identities; detailed hidden
-analysis is suspended without stopping audio. WAV/MIDI exports pin accepted
-resources independently of working edits and temporary audition controls.
-Changed/unpinnable resources and clipping fail explicitly. Recovery/preferences
-are separate from source/archive state. Project/window close is vetoable until
-save/discard/cancel, conflicts and active exports are resolved; child loss leaves
-editor buffers available for explicit restart.
+Revision admission and owned controls share a bounded ordered boundary; callback
+guards remain final authority. Global Play/Pause/Stop/Panic can retarget a newly
+accepted score in the same session, while score-bound seek/loop/audition reject
+changed identities. Stop preserves an honest partial pause/rewind outcome.
+Build, playback, Save, recovery and operation issues remain independent and retain
+attempted action/request/full identity, exact callback tickets and known continuity.
+Status sequence is a canonical decimal producer counter, independent of detail
+sequence; delayed metadata/telemetry cannot rewind newer acknowledged status.
+
+Transport, inspection and telemetry carry exact accepted identities. Hidden
+detail is suspended without stopping audio or independent meters. WAV/MIDI exports
+pin accepted source/resources independently of working edits and audition controls.
+Accepted readonly source reopening uses immutable canonical text even after
+original deletion. Changed/unpinnable resources and clipping fail explicitly.
+Recovery/preferences remain separate from source/archive state. Close is vetoable
+until save/discard/cancel, conflicts and active exports are resolved; child loss
+leaves editor buffers available for explicit Restart engine.
 
 ## Trusted process boundary
 
 
 The bundled `main` window is created in Rust. Navigation is limited to the local
 Tauri origin, new windows are denied, and each of the seven IPC entry points
-checks the calling window and origin. The capability file grants event listening,
+checks the calling window and origin. The main-window capability grants event
+listening and page zoom for maintained Cmd/Ctrl +/- and wheel zoom shortcuts,
 not filesystem or shell access. `host.openExternal` accepts explicit HTTP(S) URLs
 only and invokes the system opener without a shell. Markdown, project source,
 archive contents and plugin configuration are data, not webview permissions.
+The native window's minimum inner size is 390×320; narrow Source/Music surfaces
+therefore remain actual native windows rather than emulated browser viewports.
 
 The parent launches only the sibling `muzpad-engine` executable. Dedicated
 inherited descriptors 3 and 4 carry four-byte little-endian length-framed JSON.
@@ -62,8 +77,9 @@ deadline before escalating to process-group termination and reaping. Saturated
 private-frame traffic cannot strand shutdown before that deadline starts.
 Plugins execute trusted native code in this process boundary, **not** in individual
 plugin sandboxes. A plugin can hang or terminate the engine. The engine process
-is not an OS filesystem sandbox: read grants constrain the host's loaders and
-resolvers, not arbitrary syscalls made by trusted native plugin code.
+is not an OS filesystem sandbox: project read policy constrains host loaders and
+resolvers, not arbitrary syscalls made by approved native plugin code. Account
+read access to assets/configuration never approves an unknown executable.
 
 Authorized Reveal uses the desktop session's `org.freedesktop.FileManager1`
 `ShowItems`/`ShowFolders` methods through `gdbus`, with a four-second bounded
@@ -91,14 +107,21 @@ continues through bounded core pages rather than transferring an unbounded graph
 Export dialogs grant a native staging destination. Only a matching successful
 job may publish it; cancelled/clipped/failed jobs never publish staged audio.
 
-External read access is granted through a native folder chooser when compilation
-returns a `grant_required` failure with an absolute dependency path. The chosen
-canonical folder must contain that dependency; it receives read authority only.
-The failed build is not silently retried: the user rebuilds again so the newly
-authorized sources become part of a fresh capture. Project/import JSON cannot
-create these grants. Recovery retains at most twelve latest-project drafts within
-512 MiB; source captures are capped at 64 MiB, import/archive assets at 256 MiB,
-and interrupted-save recovery records at 128.
+Native gist/ZIP/content imports and untrusted recovery install a nonexecuting
+preview. The parent stages data and settles the child prepare-preview barrier
+before publication; neither evaluation/classification nor automatic compilation
+runs before parent-owned **Trust and run**. Project/import flags and renderer
+assertions cannot grant trust. Cancellation restores prior dirty/deleted buffers,
+tabs/undo and consumed-dependency watches without rebuilding accepted music.
+The retained score remains visibly read-only: global transport and immutable
+accepted exports are available, but score/source-bound edits are disabled.
+Approval retires prior authority before building the trusted preview; changing
+same-project policy/upload metadata cannot unfreeze preview implicitly.
+Trusted local reopening does not require per-build/per-asset approval.
+
+Recovery retains at most twelve latest-project drafts within 512 MiB; source
+captures are capped at 64 MiB, import/archive assets at 256 MiB, and
+interrupted-save recovery records at 128.
 
 Imported gist provenance is optional normalized `id[/revision]` metadata
 (32–40 lowercase hexadecimal ID characters and an optional 40-character revision).
@@ -110,8 +133,8 @@ Private formatter requests and results larger than a 2 MiB frame use sequential
 256 KiB base64 chunks in both directions, retaining the full request context and
 buffer version. Reassembly allows at most eight transfers and 64 MiB aggregate
 encoded-document payload, with a two-minute inactivity lifetime; the public source
-document limit remains 8 MiB. Exact-file plugin/config grants retain their basename
-restriction in the child rather than granting sibling files in their directory.
+document limit remains 8 MiB. Executable plugin approval remains separate from
+ordinary trusted source/asset reads.
 First-save destination checks and asset copies include project-owned resources
 only; authorized linked libraries remain links. Disk rescan validates all changed
 source/settings inputs before publishing any authoritative buffer updates.
@@ -121,6 +144,36 @@ rather than creating a phantom settings edit. A real-child regression checks thi
 initial parent snapshot through entry checking.
 Diagnostic mapping follows typed core error causes and preserves their structured
 location, help and callers without parsing a formatted terminal message.
+
+## Discovery, analysis and inspection
+
+Entry discovery evaluates captured roots/imports into song/non-song/unresolved,
+without lowering, resource pinning or audio preparation. Readiness is separate;
+only prepare/apply validates accepted playback. Declared/selected missing and
+non-song paths remain reasoned UI rows. Latest scans coalesce/cancel by captured
+identity; cancellation/global budget failure is not an empty discovery result.
+
+Native analysis consumes full contiguous 2048-sample mono `(L+R)/2` history.
+The off-realtime worker reuses FFT plan/scratch and periodic Hann normalization
+(coherent gain 0.5), producing 1025 linear peak-amplitude bins including DC/Nyquist.
+DC/Nyquist use endpoint gain; positive interior bins use the doubled gain.
+Peak/RMS are computed from that same selected unwindowed mono history in the
+existing waveform pass; independently observed stereo/master meters cannot
+replace those scalars.
+Amplitude 1 is 0 dBFS. Capture/generation/source/revision transitions retire old
+windows; warmup is not zero-padding. One pending input, one executing transform
+and one replaceable output bound worker retention. Detail negotiates at most
+30 Hz and meters independently at most 20 Hz; those ceilings are not measured
+universal rates. Parent/adapters retain bounded latest-only telemetry separately
+from reliable lifecycle/operation events. Exact exclusive window-end counters are
+rendered sample-clock positions, not physical DAC presentation timestamps.
+
+Complete graph/section/group catalogs use bounded continuations, including typed
+too-large adaptation at the same offset. Visible note tiles stage coverage, rows,
+geometry, labels, hit tests and full identity atomically. Previous-revision and
+pending presentations are explicit; hidden note work is suspended while catalog
+completion remains independent. Cache and host adapter bounds are documented in
+[Workbench host adapters](desktop-adapters.md).
 
 ### Linux build and packaging order
 

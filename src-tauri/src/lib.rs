@@ -48,7 +48,8 @@ pub fn run(){
         .setup(|app|{
             let host=Host::new(app.handle().clone())?;app.manage(host.clone());
             let window=tauri::WebviewWindowBuilder::new(app,"main",tauri::WebviewUrl::App("index.html".into()))
-                .title("muzpad").inner_size(1400.,900.).min_inner_size(480.,320.)
+                .title("muzpad").inner_size(1400.,900.).min_inner_size(390.,320.)
+                .zoom_hotkeys_enabled(true)
                 .on_navigation(trusted_url)
                 .on_new_window(|_,_|tauri::webview::NewWindowResponse::Deny)
                 .build()?;

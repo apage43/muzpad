@@ -1,5 +1,7 @@
 import { test, expect } from "@playwright/test";
 
+declare global { interface Window { renderWorkers: number } }
+
 test("track and kit M/S controls preserve playback and survive rebuilds", async ({
   page,
 }) => {
@@ -16,12 +18,12 @@ test("track and kit M/S controls preserve playback and survive rebuilds", async 
         files: { "song.muz": source },
       }),
     );
-    (window as any).renderWorkers = 0;
+    window.renderWorkers = 0;
     const NativeWorker = window.Worker;
     window.Worker = class extends NativeWorker {
       constructor(url: string | URL, options?: WorkerOptions) {
         if (String(url).includes("render.worker"))
-          (window as any).renderWorkers++;
+          window.renderWorkers++;
         super(url, options);
       }
     };
@@ -34,11 +36,7 @@ test("track and kit M/S controls preserve playback and survive rebuilds", async 
   await page.locator("#arrangement").dispatchEvent("scroll");
   await expect(page.locator("#arrangement")).toHaveAttribute(
     "data-inspection-state",
-    "loading",
-  );
-  await expect(page.locator("#arrangement")).toHaveAttribute(
-    "data-inspection-state",
-    "overview",
+    "ready",
   );
   expect(await originalButton!.evaluate((button) => button.isConnected)).toBe(
     true,
@@ -85,6 +83,6 @@ test("track and kit M/S controls preserve playback and survive rebuilds", async 
     page.getByRole("button", { name: "Solo kit.lead", exact: true }),
   ).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator("#play")).toHaveText("Ⅱ Pause");
-  expect(await page.evaluate(() => (window as any).renderWorkers)).toBe(1);
+  expect(await page.evaluate(() => window.renderWorkers)).toBe(1);
   expect(errors).toEqual([]);
 });

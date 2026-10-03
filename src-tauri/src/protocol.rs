@@ -50,11 +50,13 @@ pub struct Failure {
     #[serde(skip_serializing_if = "Option::is_none")] pub path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")] pub request_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")] pub revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub operation: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub runtime: Option<Value>,
 }
 impl Failure {
     pub fn new(code: impl Into<String>, phase: impl Into<String>, message: impl Into<String>) -> Self {
         Self { code: code.into(), phase: phase.into(), message: message.into(), continuity: "preserved".into(),
-            help: None, location: None, callers: None, path: None, request_id: None, revision: None }
+            help: None, location: None, callers: None, path: None, request_id: None, revision: None, operation: None, runtime: None }
     }
     pub fn lost(mut self) -> Self { self.continuity = "lost".into(); self }
 }
@@ -122,6 +124,31 @@ impl FrameTransfers {
     }
 }
 
+const MAX_PATH_BYTES:usize=4095;
+pub const MAX_COMPONENTS:usize=128;
+pub fn validate_path(path: &str) -> Result<(), Failure> {
+    let drive_prefix = path.as_bytes().get(1) == Some(&b':')
+        && path.as_bytes().first().is_some_and(u8::is_ascii_alphabetic);
+    if path.is_empty()
+        || path.len() > MAX_PATH_BYTES
+        || path.starts_with('/')
+        || drive_prefix
+        || path.contains(['\0', '\\'])
+        || path.split('/').count() > MAX_COMPONENTS
+        || path.split('/').any(|part| {
+            part.is_empty()
+                || part == "."
+                || part == ".."
+                || part.len() > 255
+                || part.starts_with(".muzpad-")
+        })
+    {
+        let mut error = Failure::new("denied_path", "project", "Invalid project-relative path");
+        error.path = Some(path.to_owned());
+        return Err(error);
+    }
+    Ok(())
+}
 pub fn read_frame<R: Read>(reader: &mut R) -> io::Result<Option<Value>> {
     let mut header = [0u8; 4];
     match reader.read(&mut header[..1]) { Ok(0) => return Ok(None), Ok(_) => (), Err(e) if e.kind() == io::ErrorKind::Interrupted => return read_frame(reader), Err(e) => return Err(e) }
@@ -129,10 +156,11 @@ pub fn read_frame<R: Read>(reader: &mut R) -> io::Result<Option<Value>> {
     let size = u32::from_le_bytes(header) as usize;
     if size == 0 || size > FRAME_BYTES { return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid private frame size")); }
     let mut bytes = vec![0; size]; reader.read_exact(&mut bytes)?;
-    serde_json::from_slice(&bytes).map(Some).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    let value=serde_json::from_slice::<Value>(&bytes).map_err(|e|io::Error::new(io::ErrorKind::InvalidData,e))?;
+    Ok(Some(value))
 }
 pub fn write_frame<W: Write>(writer: &mut W, value: &Value) -> io::Result<()> {
-    let bytes = serde_json::to_vec(value)?;
+    let bytes=serde_json::to_vec(value)?;
     write_encoded_frame(writer,&bytes)
 }
 pub fn write_encoded_frame<W:Write>(writer:&mut W,bytes:&[u8])->io::Result<()>{
@@ -148,13 +176,19 @@ pub fn reply(context: &Context, result: Result<Value, Failure>) -> Value {
 }
 pub fn event(context: &Context, sequence: u64, scope: &str, value: Value) -> Value {
     let mut v = serde_json::to_value(context).expect("context serializes");
-    v["sequence"] = json!(sequence.to_string()); v["event"] = json!({"scope":scope,"value":value}); v
+    v["sequence"] = json!(sequence.to_string());
+    v["barrier"] = json!(event_barrier(scope,&value));
+    v["event"] = json!({"scope":scope,"value":value}); v
+}
+pub fn event_barrier(scope:&str,value:&Value)->bool {
+    (scope=="runtime"&&(value["kind"]=="engine"||(value["kind"]=="build"&&value["phase"]=="accepted")))
+        ||(scope=="project"&&value["kind"]=="changed")
 }
 pub fn limits() -> Value {
     json!({"frameBytes":FRAME_BYTES,"sourceChunkBytes":CHUNK_BYTES,"sourceDocumentBytes":SOURCE_DOCUMENT_BYTES,
         "sourceSnapshotBytes":SOURCE_SNAPSHOT_BYTES,"outstandingRequests":64,"preparingCandidates":1,"queuedCandidates":1,
-        "inspectionRows":1000,"inspectionBytes":1048576,"statusHz":20,"analysisHz":10,"waveformSamples":2048,
-        "spectrumBins":1024,"trackMeters":1000,"analysisBytes":131072,"exportWorkers":2,"exportQueue":32,
+        "inspectionRows":1000,"inspectionBytes":1048576,"statusHz":20,"analysisHz":30,"waveformSamples":2048,
+        "spectrumBins":1025,"trackMeters":1000,"analysisBytes":131072,"exportWorkers":2,"exportQueue":32,
         "playableSnapshotBytes":268435456})
 }
 pub fn capabilities(_epoch: &str) -> Value {
