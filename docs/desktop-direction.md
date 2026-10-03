@@ -1,179 +1,94 @@
-# Desktop muzpad: high-level direction
+# Desktop implementation: remaining work
 
-This is pending product direction, before the detailed plan and implementation
-breakdown. It describes intended behavior, not shipped capabilities.
+Implement a Linux-first Tauri 2 application with trusted bundled UI and an owned
+`muzpad-engine` Rust child embedding muz-core. Keep the static web workbench
+independent: its WASM workers/Web Audio are a separate adapter, never a native
+failure fallback. Native plugins are trusted executable code; process isolation
+protects editor state from engine death, not individual plugins from each other.
+macOS/Windows boundaries should remain portable; their packaging and native
+verification are not part of the Linux acceptance claim.
 
-## Outcome and scope
+## Owning plans and edit boundaries
 
-Make muzpad both a static web workbench and a lightweight desktop muz IDE. The
-desktop application must open real local projects and execute native muz,
-including installed CLAP/VST3 plugins and local sample dependencies. Packaging
-the WASM workbench in a window alone does not meet this goal.
+| Owner | Pending plan | Exclusive implementation files |
+| --- | --- | --- |
+| Shared UI/integration | [desktop-ui.md](desktop-ui.md) | `src/main.ts`, `src/style.css`, `src/editor.ts`, `src/theme.ts`, `src/preferences.ts`, `src/views.ts`, `src/document.ts`, shared UI browser specs, `README.md` |
+| TS host adapters | [desktop-adapters.md](desktop-adapters.md) | `src/host/`, `src/audio.ts`, `src/inspection.ts`, `src/export.ts`, web worker/engine modules as necessary, `src/folder.ts`, `src/project-storage.js`, `src/assets.js`, adapter/unit tests |
+| Rust desktop host | [desktop-host.md](desktop-host.md) | all `src-tauri/`, including crate roots, protocol, parent services, engine child, Cargo/config/capabilities/resources and Rust host tests |
+| Packaging/integration | [desktop-integration.md](desktop-integration.md) | package scripts/lockfile, catalog/build configuration, release resources outside `src-tauri/`, release smoke automation; starts after UI/adapter/host integration |
 
-The first desktop target is **Linux**, with portable application boundaries.
-macOS/Windows packaging and native verification are deferred, not claimed.
-Keep the web application independently usable and statically deployable.
+Do not edit another owner's files concurrently. The packaging owner routes
+`src-tauri/` changes through its owner and README changes through the UI owner.
+The UI owner integrates both web and native adapters in the same main/style
+ownership; there is no second native UI implementation.
 
-Also deliver shared workbench improvements:
+## Frozen consuming boundaries
 
-- Close buttons on file tabs.
-- Collapsible explorer, source/document, and visualization panes, retaining the
-  existing inspector collapse behavior.
-- Two additional restrained color themes: a softer light palette and a softer
-  dark palette. Preserve the existing themes and saved selections.
-- A lightweight settings pane for appearance and layout, plus desktop-specific
-  controls only where the native workflow needs them.
+Implement `createWorkbenchHost(): Promise<WorkbenchHost>` in `src/host/index.ts`;
+`WorkbenchHost` contains `runtime`, `projects`, `preferences`, `subscribe`,
+`restartEngine`, `openExternal` and `dispose`. Declarations live only in
+`src/host/contracts.ts`. `WorkbenchRuntime` methods are `rebuild`, `format`,
+`checkEntries`, `inspect`, `explain`, `location`, `diff`, `transport`, `audition`,
+`analysis`, `export`, `subscribe`, `dispose`. UI must not access Compiler,
+AudioPlayer, workers, playable snapshots, audio asset bytes, or native invoke.
+`ProjectStore.snapshotSources` returns an immutable opaque source snapshot;
+`rebuild` contains compile/prepare/apply/receipt promotion as one operation.
+`RevisionRef` binds project ID, project epoch, engine epoch, opaque string
+revision, sourceVersion and entry. Request-scoped abort is not a global cancel.
+Only an authoritative applied receipt promotes accepted state.
 
-## Architecture direction
+The implementation handoff `local://desktop-frozen-contract.md` fixes exact DTOs,
+Tauri command names, event names and child wire commands. Transcribe those
+interfaces without alternate spellings or compatibility aliases. Every request
+and event is identity-bound; reject stale epochs/revisions and explicitly expire
+unretained handles. Retain accepted and previous Compiled metadata, with bounded
+job pins. Preserve core JSON inspection rows/diagnostics instead of inventing a
+second compiler representation.
 
-Reuse the workbench UI across two explicit environments:
+The Tauri parent owns project authority, immutable source capture, grants,
+watching, safe writes, dialogs, recovery, recents, preferences and close decisions.
+The child owns native compile/runtime/inspection/export; it receives only
+parent-authorized immutable sources/resources/output grants. Use private
+length-framed inherited protocol pipes distinct from plugin stdout/stderr, not
+`muz serve`, CLI scraping, an exposed socket, or general shell commands.
 
-- **Web:** portable WASM engine, workers, Web Audio, browser drafts and optional
-  browser folder connections. Native plugins remain unsupported here.
-- **Desktop:** native project access and a Rust host using muz-core's embedding
-  APIs, native audio and installed plugin support. Source buffers may be edited
-  without saving before a rebuild; the host must compile that coherent revision,
-  not silently substitute the disk version.
+Consume muz-core's source-independent `native::NativeRuntime`: `start`,
+`audio_config`, `status`, `plugin_stamp`, `prepare_revision`, `submit_revision`,
+`cancel_operation`, `poll`, `service_plugins`, `prepare_plugin_restart`,
+`set_running`, `restart`, `panic`, `seek_ticks`, `set_loop`, `set_audibility`,
+`set_observation`, `drain_observations`, `shutdown`, and `PluginStamp::apply`.
+The core-owned [pending plan](../../muz-core/docs/native-runtime-plan.md)
+determines Rust signatures and realtime/plugin/replay internals; do not duplicate
+its work here.
+Muzpad retains Compiled and promotes it on `NativeEvent::RevisionApplied`;
+borrow accepted/candidate Sessions rather than cloning graphs for coordination.
 
-Keep a narrow boundary for runtime operations, filesystem/project access, and
-host capabilities. Extract it around existing behavior rather than introducing a
-universal backend framework. Share workbench semantics, not browser PCM plumbing:
-compiled revisions, diagnostics, inspection, transport and export need native
-implementations; streaming PCM through UI IPC is not the desktop audio design.
-Bound inspection/analysis traffic and keep it outside the audio callback.
+Initial desktop ceilings: 2 MiB encoded frame; 256 KiB source chunks; 8 MiB per
+source and 64 MiB captured source text per revision; 64 small control requests;
+one preparing candidate plus one coalesced latest; inspection 1,000 rows/1 MiB;
+status/meters 20 Hz; detailed analysis 10 Hz, 2,048 waveform values, 1,024 bins,
+1,000 track meters and 128 KiB/frame; two export workers/32 queued jobs; core
+checked playable transfers 256 MiB. Negotiate actual limits and expose explicit
+busy/too-large errors. Core graph/expansion/decode limits remain separate from
+project text policy; native samples do not inherit browser upload limits.
 
-Prefer direct Rust library integration over scraping CLI output. Evaluate a
-lightweight system-webview shell (Tauri is a candidate) against Linux dependencies,
-startup/resource cost, packaging and the actual embedding requirements before
-selecting it. A larger bundled-browser shell needs a demonstrated benefit.
+## Landing protocol
 
-Resolve engine process ownership during the architecture spike: in-process
-integration is simpler, but a crashing native plugin could terminate the editor.
-A separate engine host adds lifecycle/IPC work but can preserve the UI and buffers
-when the engine dies. Prefer an application-owned engine process if the spike
-shows the existing APIs can support it without disproportionate complexity.
-Do not mistake this for per-plugin sandboxing or promise universal plugin safety.
-The existing `muz serve` control socket is a reuse candidate, not assumed to be a
-complete editor protocol.
+Commit these plans and the core-owned plan before feature edits. Then the shared
+UI, TS adapters and Rust host may implement their disjoint files against the
+frozen contract while core delivers NativeRuntime. Native acceptance depends on
+that real runtime; no fake backend or narrower parity cut is acceptable. Integrate
+UI/host first, then package and verify once using the owning plan scenarios.
+Workers do not run builds, tests, formatters or linters mid-flight; the integration
+owner runs the checks after all changes land.
 
-Compilation, asset decoding and plugin construction stay off the audio callback;
-prepared changes apply at block boundaries and retired state is destroyed off
-that callback. Failed rebuilds preserve the last accepted session. Preserve
-revision identity, cancellation and stale-response rejection across the boundary.
+Each implementation commit removes its delivered scope from its owning pending
+plan and updates affected live documentation in that repository. Delete exhausted
+plans and remove their index rows; do not turn them into completed checklists or
+history. Keep any still-unexercised acceptance work in the integration plan until
+it is actually exercised. Preserve unrelated edits, commit coherent owned files,
+and do not deploy.
 
-## Make local operation meaningfully better
-
-- Open folders with native dialogs; save directly and safely, including new files.
-  Keep unsaved-to-disk status distinct from not-yet-rebuilt status.
-- Retain project identity across launches and offer recent projects. Restore
-  recoverable edits without silently overwriting newer disk content.
-- Observe external edits: refresh clean buffers, surface conflicts for edited
-  buffers, and never silently discard either version. Avoid accidental rebuilds
-  against a mixture of disk and editor revisions.
-- Resolve local imports, samples and plugin configuration using native muz
-  semantics. Do not copy entire native sample libraries into browser storage or
-  impose browser upload limits on native projects. Preserve explicit resource
-  limits where needed rather than promising unlimited memory use.
-- Use native save/export dialogs and a reveal-in-file-manager action. Support
-  ordinary desktop shortcuts and safe project/window/application close.
-- Work offline for local projects and bundled documentation. GitHub/gist actions
-  remain explicitly network-dependent.
-- Show actual runtime capabilities and actionable missing-plugin/sample/audio
-  errors. Do not display browser-only dependency warnings in native mode.
-
-Keep privileges narrow: only bundled trusted UI may call native host commands;
-project Markdown, imported content and external links must not gain filesystem or
-process privileges. Native plugins execute trusted local code, not sandboxed data.
-No plugin downloading, credential storage or arbitrary shell execution is implied.
-
-## Tabs and panes
-
-Closing a tab closes its view, not the file or its project buffer. Preserve edits
-and editor state so reopening is lossless; closing a tab must neither save nor
-rebuild implicitly. Closing the active tab selects a predictable neighbor; closing
-the last tab produces a useful empty source pane without stopping playback or
-changing the selected entrypoint. Keep library tabs read-only. Protect unsaved
-work when replacing a project or quitting, separately from tab closure.
-
-Every major pane gets a discoverable collapse action and an always-reachable
-restore action. Hidden panes consume no layout space; restoration retains useful
-size and state. Keep transport and restore controls accessible even when all
-content panes are hidden. Support keyboard operation, focus movement and narrow
-stacked layouts, not just the wide desktop grid. Persist layout preferences and
-offer reset layout; collapsing a view must not reset the runtime or project.
-
-## Appearance and settings
-
-Add soft light and soft dark palettes through the existing CSS-token mechanism.
-Apply each theme consistently to CodeMirror, arrangement, graphs, meters, analysis,
-menus and native-control color scheme. Lower surface contrast must not make text,
-selection, focus or diagnostics illegible; check normal text at WCAG AA contrast.
-Do not replace the current light/dark choices or add a second styling system.
-
-Use a compact settings pane, not a new settings framework. Initial shared controls
-are theme selection and layout visibility/reset. Keep preferences separate from
-project content and exports; unavailable preference storage must not prevent
-startup. Desktop preference storage must survive normal relaunches without
-claiming synchronization with the web app. Add native audio/plugin configuration
-controls only after identifying what existing muz configuration cannot adequately
-expose; do not invent nonfunctional device/latency settings in advance.
-
-## Repository ownership and live-document protocol
-
-- **muzpad:** desktop application host/bridge, UI, project workflows, packaging,
-  shared settings and presentation; its pending plan lives under `docs/`.
-- **muz-core:** reusable engine/API changes only where the integration proves a
-  gap. Existing native support is not evidence that core changes are unnecessary,
-  nor a reason to duplicate engine logic in muzpad. Before core implementation,
-  commit its concrete pending plan under `../muz-core/docs/`, following its repo
-  instructions. Update its embedding/live docs with changed contracts.
-- Do not mirror task lists across repos. Each detailed task has one owner; record
-  only the required cross-repository interface/dependency in the consuming plan.
-- Commit plans before implementation. Update them during decomposition. Every
-  implementation commit removes the implemented scope from planning documents
-  and updates affected live documentation in that same owning repository.
-- Planning documents contain only remaining work, not completed checklists,
-  progress journals or historical architecture decisions. Delete exhausted plans;
-  source control retains history. Replace this direction document as detailed
-  plans absorb its outstanding scope rather than leaving redundant promises.
-- Commit coherent changes in their owning repos, exclude unrelated changes, and
-  keep everything local unless deployment is explicitly requested.
-
-## Gates before the proper plan and decomposition
-
-1. Exercise a minimal Linux native-host path: local project plus unsaved-source
-   overlay, an installed supported plugin, audio output, rebuild and inspection.
-   Compare current library embedding with the control-socket route; choose shell,
-   process ownership and the smallest complete host contract from that evidence.
-2. Inventory parity against the existing workbench: source formatting, entrypoint
-   discovery, accepted/rejected rebuilds, transport/seek/loop, audition, mute/solo,
-   inspection/analysis, exports, assets and recovery. Assign every operation to a
-   shared or environment-specific implementation; no silent desktop omissions.
-3. Identify exact core gaps and platform prerequisites, document cross-repository
-   interfaces and dependency order, and commit the remaining-work plans in the
-   appropriate repositories before implementing those changes.
-4. Decompose around runnable vertical slices: native execution and project safety;
-   shared tab/layout controls; appearance/settings; packaging and integration.
-   Parallelize only after contracts and file ownership are clear. Tabs/layout and
-   themes/settings both currently touch `src/main.ts` and `src/style.css`; they
-   are not safe concurrent edits without an explicit integration owner.
-
-## Acceptance evidence required by the detailed plan
-
-Run the actual Linux desktop application against a real folder with a supported
-installed native plugin and local assets. Demonstrate edit/rebuild/playback,
-inspection, export, external-edit conflict handling, recovery and clean shutdown.
-Exercise native-engine failure behavior according to the chosen process model;
-report plugin coverage and latency measurements without generalizing guarantees.
-A missing plugin/audio service is a visible failure, never a silent WASM fallback.
-
-Exercise close/reopen (including modified, inactive, library and last tabs), pane
-collapse/restore at wide and narrow widths, keyboard focus, theme consistency and
-settings persistence on the actual UI. Retain browser behavior and run relevant
-existing browser/core checks after integration. Packaging must launch outside the
-development server without requiring a sibling source checkout. Record findings
-in the work report, not as permanent completed-plan entries.
-
-Plugin GUI embedding, recording, DAW-style note editing, new plugin formats,
-per-plugin isolation, cloud synchronization and an extension marketplace are not
-part of this direction. Revisit only if a demonstrated requirement changes scope.
+No plugin GUI, recording, piano-roll editing, new plugin format, per-plugin
+sandbox, cloud sync, extension marketplace, automatic plugin download, credentials,
+or speculative audio-device/latency controls are required.
