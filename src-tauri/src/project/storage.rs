@@ -3,7 +3,7 @@
 use crate::protocol::Failure;
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -453,7 +453,7 @@ impl Storage {
                 (r["updatedMillis"].as_u64().unwrap(), r["id"].as_str().unwrap()))
                 .map(|(index, _)| index).unwrap();
             let (published, size) = records.swap_remove(newest);
-            let victims = retention_victims(&records, &published, size, RECOVERY_COUNT, RECOVERY_BYTES)?;
+            let victims = retention_victims(&records, size, RECOVERY_COUNT, RECOVERY_BYTES)?;
             for victim in &victims {
                 self.recovery.remove(&format!("{DRAFT_PREFIX}{victim}.json"))?;
             }
@@ -468,7 +468,7 @@ impl Storage {
             .then_with(|| a.0["id"].as_str().cmp(&b.0["id"].as_str())));
         Ok(records.into_iter().map(|(record, _)| record).collect())
     }
-    pub fn put_recovery(&self, record: &Value) -> Result<(), Failure> {
+    pub fn put_recovery(&self, record: &Value) -> Result<Vec<String>, Failure> {
         validate_recovery(record)?;
         let bytes = encode(record, RECORD_BYTES)?;
         let id = record["id"].as_str().unwrap();
@@ -479,12 +479,12 @@ impl Storage {
             }
         }
         records.retain(|(old, _)| old["id"] != record["id"]);
-        let victims = retention_victims(&records, record, bytes.len() as u64, RECOVERY_COUNT, RECOVERY_BYTES)?;
-        // Never prune until the replacement is durable. A crash in this short
-        // window is reconciled by records(), which preserves each project's newest.
+        let victims = retention_victims(&records, bytes.len() as u64, RECOVERY_COUNT, RECOVERY_BYTES)?;
+        // Never prune until the incoming draft is durable. A crash in this short
+        // window is reconciled by records(), which keeps the newest publication.
         self.recovery.write(&format!("{DRAFT_PREFIX}{id}.json"), &bytes)?;
-        for victim in victims { self.recovery.remove(&format!("{DRAFT_PREFIX}{victim}.json"))?; }
-        Ok(())
+        for victim in &victims { self.recovery.remove(&format!("{DRAFT_PREFIX}{victim}.json"))?; }
+        Ok(victims)
     }
     pub fn remove_recovery(&self, id: &str) -> Result<(), Failure> {
         safe_id(id)?;
@@ -492,20 +492,14 @@ impl Storage {
     }
 }
 
-fn retention_victims(records: &[(Value, u64)], incoming: &Value, size: u64,
+fn retention_victims(records: &[(Value, u64)], size: u64,
     count_limit: usize, byte_limit: u64) -> Result<Vec<String>, Failure> {
-    let mut newest: HashMap<&str, (u64, &str)> = HashMap::new();
-    for record in records.iter().map(|(r, _)| r).chain(std::iter::once(incoming)) {
-        let project = record["project"].as_str().unwrap();
-        let key = (record["updatedMillis"].as_u64().unwrap(), record["id"].as_str().unwrap());
-        let current = newest.entry(project).or_insert(key);
-        if key > *current { *current = key; }
+    if count_limit == 0 || size > byte_limit {
+        return Err(budget("The current recovery draft exceeds the storage limit"));
     }
     let mut count = records.len() + 1;
     let mut bytes = records.iter().map(|(_, n)| n).sum::<u64>() + size;
-    let mut candidates: Vec<_> = records.iter().filter(|(r, _)| {
-        newest[r["project"].as_str().unwrap()].1 != r["id"].as_str().unwrap()
-    }).collect();
+    let mut candidates: Vec<_> = records.iter().collect();
     candidates.sort_by(|(a, _), (b, _)|
         a["updatedMillis"].as_u64().cmp(&b["updatedMillis"].as_u64())
             .then_with(|| a["id"].as_str().cmp(&b["id"].as_str())));
@@ -515,9 +509,6 @@ fn retention_victims(records: &[(Value, u64)], incoming: &Value, size: u64,
         victims.push(record["id"].as_str().unwrap().to_owned());
         count -= 1;
         bytes -= size;
-    }
-    if count > count_limit || bytes > byte_limit {
-        return Err(budget("Recovery storage is full; the newest draft of each project was preserved. Explicitly discard an unwanted recovery before retrying"));
     }
     Ok(victims)
 }
@@ -533,7 +524,7 @@ impl Storage {
     pub fn load_preferences(&self) -> Result<Value, Failure> { Err(unsupported()) }
     pub fn save_preferences(&self, _value: &Value) -> Result<(), Failure> { Err(unsupported()) }
     pub fn recovery_records(&self) -> Result<Vec<Value>, Failure> { Err(unsupported()) }
-    pub fn put_recovery(&self, _record: &Value) -> Result<(), Failure> { Err(unsupported()) }
+    pub fn put_recovery(&self, _record: &Value) -> Result<Vec<String>, Failure> { Err(unsupported()) }
     pub fn remove_recovery(&self, _id: &str) -> Result<(), Failure> { Err(unsupported()) }
 }
 #[cfg(not(target_os = "linux"))]
@@ -593,13 +584,13 @@ mod tests {
         assert_eq!(timestamp_at(951_827_696_789), "2000-02-29T12:34:56.789Z");
     }
     #[test]
-    fn retention_preserves_every_projects_newest_and_incoming() {
-        let records = vec![(draft("old", "a", 1), 10), (draft("new", "a", 2), 10), (draft("only", "b", 3), 10)];
-        let incoming = draft("incoming", "c", 4);
-        assert_eq!(retention_victims(&records, &incoming, 10, 3, 40).unwrap(), vec!["old"]);
-        assert_eq!(retention_victims(&records, &incoming, 10, 4, 30).unwrap(), vec!["old"]);
-        assert_eq!(retention_victims(&records, &incoming, 10, 2, 40).unwrap_err().code, "storage_budget");
-        assert!(retention_victims(&records, &incoming, 10, 4, 29).is_err());
+    fn retention_evicts_oldest_by_count_and_bytes() {
+        let records = vec![(draft("new", "a", 2), 10), (draft("only", "b", 3), 10), (draft("old", "a", 1), 10)];
+        assert_eq!(retention_victims(&records, 10, 3, 40).unwrap(), vec!["old"]);
+        assert_eq!(retention_victims(&records, 10, 4, 30).unwrap(), vec!["old"]);
+        assert_eq!(retention_victims(&records, 10, 2, 40).unwrap(), vec!["old", "new"]);
+        assert_eq!(retention_victims(&records, 10, 4, 29).unwrap(), vec!["old", "new"]);
+        assert_eq!(retention_victims(&records, 31, 4, 30).unwrap_err().code, "storage_budget");
     }
     #[test]
     fn bounded_encoding_and_recents_validation() {
@@ -654,16 +645,18 @@ mod tests {
     }
     #[cfg(target_os = "linux")]
     #[test]
-    fn retention_failure_does_not_remove_a_project_draft() {
+    fn full_recovery_evicts_oldest_and_keeps_updated_drafts() {
         let root = tempfile::tempdir().unwrap(); let store = storage(root.path());
         for n in 0..RECOVERY_COUNT { store.put_recovery(&draft(&format!("draft-{n}"), &format!("project-{n}"), n as u64)).unwrap(); }
-        assert_eq!(store.put_recovery(&draft("overflow", "other", 99)).unwrap_err().code, "storage_budget");
-        assert_eq!(store.recovery_records().unwrap().len(), RECOVERY_COUNT);
-        store.put_recovery(&draft("replacement", "project-0", 100)).unwrap();
-        let records = store.recovery_records().unwrap();
+        assert_eq!(store.put_recovery(&draft("incoming", "other", 99)).unwrap(), vec!["draft-0"]);
+        assert!(store.put_recovery(&draft("draft-1", "project-1", 100)).unwrap().is_empty());
+        drop(store);
+        let records = storage(root.path()).recovery_records().unwrap();
         assert_eq!(records.len(), RECOVERY_COUNT);
-        assert!(records.iter().any(|r| r["id"] == "replacement"));
+        assert_eq!(records[0]["id"], "draft-1");
+        assert_eq!(records[1]["id"], "incoming");
         assert!(!records.iter().any(|r| r["id"] == "draft-0"));
+        assert!(records.iter().any(|r| r["id"] == "draft-2"));
     }
     #[cfg(target_os = "linux")]
     #[test]
@@ -698,7 +691,7 @@ mod tests {
         for n in 0..RECOVERY_COUNT {
             store.put_recovery(&draft(&format!("draft-{n}"), &format!("project-{n}"), n as u64)).unwrap();
         }
-        let replacement = draft("replacement", "project-0", 100);
+        let replacement = draft("replacement", "new-project", 100);
         // Model a crash after rename+fsync but before the retention unlink.
         store.recovery.write("muzpad-draft-v1-replacement.json", &encode(&replacement, RECORD_BYTES).unwrap()).unwrap();
         drop(store);

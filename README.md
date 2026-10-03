@@ -32,6 +32,19 @@ edits retain the previous accepted session. Compatible edits retain the renderin
 engine, held voices and matching processor state; structural changes use the
 engine's reconciliation decisions and cutover fades.
 
+While the first build is pending, Play explains **Capturing**, **Compiling**,
+**Loading audio**, and **Applying**; it becomes available only after audio-engine
+acknowledgement. Previously accepted music remains playable during a rebuild.
+The compact bottom row keeps actionable failures visible; **Status details**
+opens build diagnostics, revision effects, and completed action receipts.
+
+Native `contrib/` modules and assets use the first existing installation:
+`MUZ_CONTRIB_DIR`, the sibling `muz-core/contrib` checkout at the build location,
+then `$XDG_DATA_HOME/muz/contrib` (or `$HOME/.local/share/muz/contrib`).
+Bundled contributed text is the fallback when no external installation exists;
+sample/plugin assets are not bundled. This does not change imported-project trust
+confirmation or dependency authorization.
+
 ## Workspace
 
 - Browse project files and gist links, with muz-core's README, std, contrib, docs, and examples
@@ -67,11 +80,13 @@ engine's reconciliation decisions and cutover fades.
   access; working buffers remain available, and restored watch readiness clears
   the folder warning without hiding unrelated engine diagnostics.
 - Project replacement and desktop window close use a save/discard/cancel gate.
-  Conflicts and active export jobs can veto closure. Native recovery offers are
-  explicit; Recent projects and Reveal project use the host's authorized roots.
-  Browser draft/Previous workspace recovery remains available through the same
-  project interface. A gist URL is fetched afresh on startup, with cached local
-  changes offered as Previous rather than replacing the requested remote source.
+  Conflicts and active export jobs can veto closure. **Project → Recovery copies**
+  opens the recovery chooser; Recent projects and Reveal project use the host's
+  authorized roots. Native recovery keeps at most twelve copies within 512 MiB,
+  automatically evicting the oldest after the incoming copy is durably written.
+  Browser draft/Previous workspace recovery uses the same chooser. A gist URL is
+  fetched afresh on startup, with cached local changes offered as Previous rather
+  than replacing the requested remote source.
   The chosen recovery copy stays intact while the current project's safety gate
   runs. Clearing browser site data removes its recovery.
   If browser storage denies a recovery write, **Recovery unavailable** stays visible

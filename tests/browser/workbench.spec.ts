@@ -94,6 +94,7 @@ test("Ctrl+Enter rebuilds without inserting a line", async ({ page }) => {
   await expect(page.locator("#revision")).toHaveText("Revision 2 accepted");
   expect(await countWorkers(page)).toBe(rendererWorkers);
   await expect(page.locator(".cm-line")).toHaveCount(lines);
+  await page.locator("#status-details > summary").click();
   await page.locator("#revision-effects summary").click();
   await expect(page.locator("#diff-category")).toBeVisible();
   await expect(page.locator("#diff-page pre")).toBeVisible();
@@ -1556,6 +1557,7 @@ test("cancelling ZIP replacement settles its original request without hiding a r
   await page.locator("#export-submit").click();
   expect((await readFile((await (await downloaded).path())!)).toString("ascii", 0, 4)).toBe("MThd");
   await page.locator("#export-close").click();
+  await page.locator("#status-details > summary").click();
   const exportReceipt = page.locator('.action-status[data-outcome="applied"]').filter({ hasText: /Export/ }).first();
   await expect(exportReceipt).toBeVisible();
   const exportRequest = await exportReceipt.getAttribute("data-action-request");
@@ -1572,7 +1574,6 @@ test("cancelling ZIP replacement settles its original request without hiding a r
   const request = await importer.getAttribute("data-action-request");
   await page.locator("#workflow-dialog").getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(page.locator(`.action-status[data-action-request="${request}"]`)).toHaveAttribute("data-outcome", "cancelled");
-  await expect(page.locator("#workflow-status")).not.toContainText("Reading archive data…");
   await expect(page.locator(`.action-status[data-action-request="${exportRequest}"]`)).toBeVisible();
   await expect(page.locator("#project-title")).toHaveText(fixture.title);
   await expect(page.locator(".cm-content")).toContainText("retained ZIP cancellation edit");

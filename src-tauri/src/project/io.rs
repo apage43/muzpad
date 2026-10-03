@@ -26,7 +26,10 @@ pub fn boot_grants(resource_dir: &Path, event: &super::watch::EventSink) -> Resu
     if explicit.as_ref().is_some_and(|path| !path.is_dir()) {
         event(json!({"kind":"failure","project":null,"failure":failure("missing_module","MUZ_CONTRIB_DIR does not name an installed library directory")}));
     }
-    if let Some(path) = explicit.filter(|path| path.is_dir()).or(installed.filter(|path| path.is_dir())) {
+    // Locally built releases retain the sibling checkout as an optional install
+    // source. Packaged apps still work elsewhere through the normal muz install.
+    let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../muz-core/contrib");
+    if let Some(path) = contrib_installation(explicit, checkout, installed) {
         let root = Arc::new(Root::open(&path.canonicalize()?)?);
         grants.push(Grant { id:"contrib".into(),kind:"library",path:root.path().to_owned(),root,exact:None });
     }
@@ -55,6 +58,9 @@ pub fn boot_grants(resource_dir: &Path, event: &super::watch::EventSink) -> Resu
     if let Some(home) = std::env::var_os("HOME") { paths.push(PathBuf::from(&home).join(".vst3")); paths.push(PathBuf::from(home).join(".clap")); }
     for path in paths { if path.exists() { add_plugin_grant(&mut grants, &path)?; } }
     Ok(grants)
+}
+fn contrib_installation(explicit: Option<PathBuf>, checkout: PathBuf, installed: Option<PathBuf>) -> Option<PathBuf> {
+    explicit.into_iter().chain(std::iter::once(checkout)).chain(installed).find(|path| path.is_dir())
 }
 fn add_plugin_grant(grants: &mut Vec<Grant>, path: &Path) -> Result<(), Failure> {
     let canonical = path.canonicalize()?;
@@ -199,5 +205,21 @@ mod tests {
         ]), false).unwrap();
         child.plugin(&plugin).unwrap();
         assert!(child.open(&installation.path().join("other.clap")).is_err());
+    }
+
+    #[test]
+    fn contrib_uses_explicit_then_checkout_then_normal_installation() {
+        let root = tempfile::tempdir().unwrap();
+        let explicit = root.path().join("explicit");
+        let checkout = root.path().join("checkout/contrib");
+        let installed = root.path().join("data/muz/contrib");
+        std::fs::create_dir_all(&installed).unwrap();
+        assert_eq!(contrib_installation(None, checkout.clone(), Some(installed.clone())), Some(installed.clone()));
+        std::fs::create_dir_all(&checkout).unwrap();
+        assert_eq!(contrib_installation(None, checkout.clone(), Some(installed.clone())), Some(checkout.clone()));
+        std::fs::create_dir_all(&explicit).unwrap();
+        assert_eq!(contrib_installation(Some(explicit.clone()), checkout.clone(), Some(installed)), Some(explicit));
+        assert_eq!(contrib_installation(None, checkout.clone(), None), Some(checkout));
+        assert!(contrib_installation(None, root.path().join("missing"), None).is_none());
     }
 }

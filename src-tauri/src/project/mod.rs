@@ -264,8 +264,8 @@ impl ProjectService {
         if workspace.persisted { self.record_recent(&workspace)?; }
         let initial_recovery = if workspace.dirty() {
             let record = operations::recovery_record(&workspace);
-            self.storage.put_recovery(&record)?;
-            Some(offer(&record))
+            let expired = self.storage.put_recovery(&record)?;
+            Some((offer(&record), expired))
         } else { None };
         let snapshot = workspace.snapshot();
         if !workspace.trusted&&self.preview_backup.is_none() {
@@ -279,7 +279,11 @@ impl ProjectService {
         *self.state.lock() = Some(workspace);
         self.permit = None; self.replacement = None; self.allow_exit = false; self.retained = None; self.previous_snapshot = None;
         self.snapshots.clear(); self.snapshot_order.clear();
-        if let Some(recovery) = initial_recovery { self.offers.retain(|value| value["id"] != recovery["id"]); self.offers.push(recovery.clone()); (self.event)(json!({"kind":"recovery","offer":recovery})); }
+        if let Some((recovery, expired)) = initial_recovery {
+            self.offers.retain(|value| value["id"] != recovery["id"] && !expired.iter().any(|id| value["id"] == id.as_str()));
+            self.offers.push(recovery);
+            (self.event)(json!({"kind":"recovery","offers":self.offers}));
+        }
         self.reclaim_private_workspaces();
         Ok(snapshot)
     }

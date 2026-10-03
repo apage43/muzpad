@@ -176,18 +176,24 @@ impl ProjectService {
         let state = self.state.clone(); let guard = state.lock(); let workspace = guard.as_ref().ok_or_else(|| failure("stale_request", "No open project"))?;
         if workspace.persisted && !workspace.dirty() {
             let id = workspace.project.clone(); drop(guard);
-            self.storage.remove_recovery(&id)?; self.offers.retain(|v| v["id"] != id); return Ok(());
+            self.storage.remove_recovery(&id)?; self.offers.retain(|v| v["id"] != id);
+            (self.event)(json!({"kind":"recovery","offers":self.offers})); return Ok(());
         }
         let record = recovery_record(workspace);
         drop(guard);
-        self.storage.put_recovery(&record)?;
-        let offer = offer(&record); self.offers.retain(|v| v["id"] != record["id"]); self.offers.push(offer.clone());
-        (self.event)(json!({"kind":"recovery","offer":offer})); Ok(())
+        let expired = self.storage.put_recovery(&record)?;
+        self.offers.retain(|v| v["id"] != record["id"] && !expired.iter().any(|id| v["id"] == id.as_str()));
+        self.offers.push(offer(&record));
+        (self.event)(json!({"kind":"recovery","offers":self.offers})); Ok(())
     }
     pub fn stage_recovery(&mut self, input: &Value) -> Result<bool,Failure> {
         let id = field(input,"id")?;
         match field(input,"action")? {
-            "discard" => { self.storage.remove_recovery(id)?; self.offers.retain(|v| v["id"] != id); self.reclaim_private_workspaces(); return Ok(false); },
+            "discard" => {
+                self.storage.remove_recovery(id)?; self.offers.retain(|v| v["id"] != id);
+                (self.event)(json!({"kind":"recovery","offers":self.offers}));
+                self.reclaim_private_workspaces(); return Ok(false);
+            },
             "restore" => self.check_replacement()?, _ => return Err(failure("invalid_source", "Unknown recovery action")),
         }
         if self.staged_project.is_some(){return Err(failure("queue_full","One project transition is already being staged"));}

@@ -63,7 +63,8 @@ test("URL gist fetches updated source on reload and keeps local edits in Previou
   await expect(page.locator(".cm-content")).toContainText("updated on GitHub");
   await expect(page.locator(".cm-content")).not.toContainText("local edit");
   expect(requests).toBe(2);
-  await page.getByRole("button", { name: "Previous workspace" }).click();
+  await clickCommand(page, "#project-recovery");
+  await page.getByRole("radio", { name: /Previous workspace/ }).check();
   await page.locator("#workflow-dialog").getByRole("button", { name: "Restore", exact: true }).click();
   await expect(page.locator(".cm-content")).toContainText("local edit");
   // Visiting without a gist parameter still recovers the local draft.
@@ -76,7 +77,8 @@ test("URL gist fetches updated source on reload and keeps local edits in Previou
   await expect(page).not.toHaveURL(/gist=/);
   await expect(page.locator("#download")).toBeAttached();
   await expect(page.locator("#view-gist")).toBeHidden();
-  await page.getByRole("button", { name: "Previous workspace" }).click();
+  await clickCommand(page, "#project-recovery");
+  await page.getByRole("radio", { name: /Previous workspace/ }).check();
   await page.locator("#workflow-dialog").getByRole("button", { name: "Restore", exact: true }).click();
   await expect(page).toHaveURL(new RegExp(`gist=${id}`));
   await expect(page.locator(".cm-content")).toContainText("local edit");
@@ -137,7 +139,8 @@ test("a failed URL gist request never falls back to the matching cached draft", 
     "cached local edits",
   );
   await expect(page.locator("#play")).toBeDisabled();
-  await page.getByRole("button", { name: "Previous workspace" }).click();
+  await clickCommand(page, "#project-recovery");
+  await page.getByRole("radio", { name: /Previous workspace/ }).check();
   await page.locator("#workflow-dialog").getByRole("button", { name: "Restore", exact: true }).click();
   await expect(page.locator(".cm-content")).toContainText("cached local edits");
 });
@@ -193,7 +196,6 @@ test("canceling an in-flight import keeps the current workspace", async ({
   await expect(page.locator("#workflow-status")).toContainText("Fetching source from GitHub");
   await expect(page.locator("#build-state")).toHaveText("Accepted");
   await page.locator("#gist-cancel").click();
-  await expect(page.locator("#workflow-status")).toContainText("Cancelled; your current workspace is unchanged");
   await expect(page.locator("#build-state")).toHaveText("Accepted");
   release();
   await expect(page.locator("#project-title")).toHaveText("Untitled project");

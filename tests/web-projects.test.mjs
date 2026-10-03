@@ -128,7 +128,7 @@ async function mounted(subject) {
   subject.subscribe((event) => events.push(event));
   assert.equal(subject.coreRevision, "core-test-commit");
   assert.equal(events[0].snapshot.files[0].text, "unsaved text");
-  assert.equal(events.find((event) => event.kind === "recovery").offer.id, "muzpad-previous-v1");
+  assert.equal(events.find((event) => event.kind === "recovery").offers[0].id, "muzpad-previous-v1");
   const current = events[0].snapshot;
   const permission = await subject.prepareClose({ capture: capture(current), reason: "replaceProject",
     decision: "discard", cancelExports: false, ticket: null }, operation());
@@ -514,7 +514,7 @@ test("a startup gist URL offers the draft as Previous without resuming it as the
   const events = [];
   subject.subscribe(event => events.push(event));
   assert.equal(events.some(event => event.kind === "changed"), false);
-  assert.equal(events.find(event => event.kind === "recovery").offer.id, "muzpad-previous-v1");
+  assert.equal(events.find(event => event.kind === "recovery").offers[0].id, "muzpad-previous-v1");
   const remote = await imported(subject);
   assert.notEqual(remote.project, draft.id);
   assert.equal(JSON.parse(localStorage.getItem("muzpad-previous-v1")).files["song.muz"], draft.files["song.muz"]);

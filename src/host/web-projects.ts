@@ -299,7 +299,7 @@ export class WebProjectStore implements ProjectStore {
   private offer(id: string, stored: Stored) {
     const offer: RecoveryOffer = { id, project: stored.id, title: stored.title, rootLabel: stored.folderName ?? null, updatedAt: stored._web?.updatedAt ?? new Date().toISOString() };
     this.offers.set(id, offer);
-    this.emit({ kind: "recovery", offer });
+    this.emit({ kind: "recovery", offers: [...this.offers.values()].map(copy) });
   }
   private async remember(state: State) {
     const item: RecentProject = { project: state.project, title: state.settings.title, rootLabel: state.rootLabel ?? "Browser copy", available: true, lastOpened: new Date().toISOString() };
@@ -670,6 +670,7 @@ export class WebProjectStore implements ProjectStore {
       if (input.action === "discard") {
         await removeStoredProject(input.id);
         this.offers.delete(input.id); this.recovery.delete(input.id);
+        this.emit({ kind: "recovery", offers: [...this.offers.values()].map(copy) });
         return null;
       }
       const state = await this.fromStored(stored);
@@ -982,7 +983,7 @@ export class WebProjectStore implements ProjectStore {
     this.assertLive();
     this.listeners.add(listener);
     if (this.current) listener({ kind: "changed", snapshot: this.snapshot(this.current), reason: "recovery" });
-    for (const offer of this.offers.values()) listener({ kind: "recovery", offer: copy(offer) });
+    if (this.offers.size) listener({ kind: "recovery", offers: [...this.offers.values()].map(copy) });
     for (const detail of this.startupFailures) listener({ kind: "failure", project: null, failure: copy(detail) });
     return () => { this.listeners.delete(listener); };
   }

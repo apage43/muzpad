@@ -223,7 +223,7 @@ export type ResolvedSourceDocument =
 export type ProjectEvent =
   {kind: 'changed'; snapshot: ProjectSnapshot; reason: 'disk'|'save'|'conflict'|'recovery'} |
   {kind: 'watch'; project: ProjectRef; state: 'ready'|'degraded'|'rootMissing'; failure: Failure|null} |
-  {kind: 'recovery'; offer: RecoveryOffer} |
+  {kind: 'recovery'; offers: RecoveryOffer[]} |
   {kind: 'failure'; project: ProjectRef|null; failure: Failure};
 export interface ProjectStore {
   chooseFolder(op: Operation): Promise<ProjectSnapshot|null>;

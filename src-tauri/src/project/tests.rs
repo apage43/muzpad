@@ -4,7 +4,8 @@ fn service() -> (tempfile::TempDir, ProjectService) {
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().join("data"); let config = dir.path().join("config"); let resources = dir.path().join("resources");
     std::fs::create_dir_all(&data).unwrap(); std::fs::create_dir_all(&config).unwrap(); std::fs::create_dir_all(resources.join("library/contrib/test")).unwrap();
-    let service = ProjectService::new(data,config,resources,Arc::new(|_|{})).unwrap();
+    let mut service = ProjectService::new(data,config,resources,Arc::new(|_|{})).unwrap();
+    service.grants.retain(|grant| grant.id != "contrib");
     (dir,service)
 }
 fn settings() -> Settings { Settings { title:"Test project".into(),entry:"main.muz".into(),entries:None } }
@@ -469,6 +470,27 @@ fn continuation_watch_refresh_deletion_missing_root_recents_and_preferences_are_
     let reloaded = ProjectService::new(dir.path().join("data"),dir.path().join("config"),dir.path().join("resources"),Arc::new(|_|{})).unwrap();
     assert_eq!(reloaded.storage.load_preferences().unwrap(),preferences);
     assert_eq!(reloaded.recovery_offers().len(),1);
+}
+
+#[test]
+fn recovery_eviction_removes_expired_offers_without_blocking_project_creation() {
+    let (_dir, mut service) = service();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let output = events.clone();
+    service.event = Arc::new(move |event| output.lock().push(event));
+    for _ in 0..14 {
+        if service.current_ref().is_some() { permit_replacement(&mut service); }
+        start(&mut service);
+    }
+    let records = service.storage.recovery_records().unwrap();
+    let retained: BTreeSet<_> = records.iter().map(|record| record["id"].as_str().unwrap()).collect();
+    let offers = service.recovery_offers();
+    assert_eq!(retained.len(), 12);
+    assert_eq!(offers.iter().map(|offer| offer["id"].as_str().unwrap()).collect::<BTreeSet<_>>(), retained);
+    assert!(retained.contains(service.current_ref().unwrap().project.as_str()));
+    let published = events.lock();
+    let last = published.iter().rev().find(|event| event["kind"] == "recovery").unwrap();
+    assert_eq!(last["offers"].as_array().unwrap().iter().map(|offer| offer["id"].as_str().unwrap()).collect::<BTreeSet<_>>(), retained);
 }
 
 #[test]

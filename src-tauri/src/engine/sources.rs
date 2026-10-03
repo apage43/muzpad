@@ -302,12 +302,15 @@ impl PinnedAssets {
         Ok(Arc::new(Self { grants:None,directory,state:Mutex::new(state),error:Mutex::new(None),decoded:Arc::new(Default::default()) }))
     }
     pub fn pin_plugins(&self,session:&mut muz::Session)->Result<(),Failure>{
-        fn visit(assets:&PinnedAssets,device:&mut muz::model::Device)->Result<(),Failure>{
+        fn visit(assets:&PinnedAssets,device:&mut muz::model::Device,bundles:&mut BTreeMap<PathBuf,Arc<PluginBundle>>)->Result<(),Failure>{
             if let Some(plugin)=&mut device.vst3 {
                 let path=PathBuf::from(&plugin.bundle_env);
                 let grants=assets.grants.as_ref().ok_or_else(||failure("missing_plugin","Missing plugin grants"))?;
                 grants.plugin(&path)?;
                 let path=grants.canonical(&path)?;
+                // Capture a shared bundle once per candidate, never reuse live
+                // dependency authority from another source capture.
+                let bundle=if let Some(bundle)=bundles.get(&path){bundle.clone()}else{
                 let name=path.file_name().ok_or_else(||failure("missing_plugin","Invalid plugin bundle name"))?;
                 fn collect(assets:&PinnedAssets,path:&Path,relative:&Path,files:&mut Vec<(PathBuf,Pin)>,depth:usize)->Result<(),Failure>{
                     if depth>64||files.len()>8192{return Err(failure("resource_budget","Plugin bundle exceeds traversal budget"));}
@@ -356,17 +359,21 @@ impl PinnedAssets {
                         cache.insert(identity,Arc::downgrade(&bundle));bundle
                     }
                 };
+                    bundles.insert(path,bundle.clone());
+                    bundle
+                };
                 plugin.bundle_env=bundle.root.to_string_lossy().into_owned();
                 let mut state=assets.state.lock();
                 if !state.bundles.iter().any(|b|Arc::ptr_eq(b,&bundle)){
                     state.plugins.extend(bundle.files.iter().cloned());state.bundles.push(bundle);
                 }
             }
-            if let Some(rack)=&mut device.rack{for child in rack.branches.iter_mut().flatten(){visit(assets,child)?;}}
+            if let Some(rack)=&mut device.rack{for child in rack.branches.iter_mut().flatten(){visit(assets,child,bundles)?;}}
             Ok(())
         }
+        let mut bundles=BTreeMap::new();
         for device in session.tracks.iter_mut().flat_map(|t|std::iter::once(&mut t.instrument).chain(t.inserts.iter_mut()))
-            .chain(session.buses.iter_mut().flat_map(|b|b.inserts.iter_mut())).chain(session.master.inserts.iter_mut()){visit(self,device)?;}
+            .chain(session.buses.iter_mut().flat_map(|b|b.inserts.iter_mut())).chain(session.master.inserts.iter_mut()){visit(self,device,&mut bundles)?;}
         Ok(())
     }
 }

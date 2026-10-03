@@ -43,6 +43,16 @@ attempted action/request/full identity, exact callback tickets and known continu
 Status sequence is a canonical decimal producer counter, independent of detail
 sequence; delayed metadata/telemetry cannot rewind newer acknowledged status.
 
+The bottom status row exposes actionable outcomes without expanding completed
+receipts. **Status details** discloses completed receipts, full build diagnostics,
+host details, and revision effects. Initial Play readiness follows capture,
+compilation, instrument/sample/plugin loading, and authoritative audio application;
+accepted music remains playable while its replacement is prepared. Entry
+classification is deferred during Rebuild, and the exact accepted entry does not
+need another evaluation merely to classify it. Plugin bundle bytes are captured
+once per canonical bundle within a candidate; each device still checks approval,
+and subsequent candidates recapture bytes and validate dependencies.
+
 Transport, inspection and telemetry carry exact accepted identities. Hidden
 detail is suspended without stopping audio or independent meters. WAV/MIDI exports
 pin accepted source/resources independently of working edits and audition controls.
@@ -119,9 +129,14 @@ Approval retires prior authority before building the trusted preview; changing
 same-project policy/upload metadata cannot unfreeze preview implicitly.
 Trusted local reopening does not require per-build/per-asset approval.
 
-Recovery retains at most twelve latest-project drafts within 512 MiB; source
-captures are capped at 64 MiB, import/archive assets at 256 MiB, and
-interrupted-save recovery records at 128.
+**Project → Recovery copies** presents restore/discard choices. Native recovery
+retains at most twelve drafts within 512 MiB. Incoming drafts are published and
+fsynced before the oldest copies are evicted, including a project's last copy
+when necessary; count/byte limits no longer reject a draft merely to preserve
+every project's newest copy. Recovery events publish authoritative offer lists
+so expired copies disappear from the chooser. Source captures are capped at
+64 MiB, import/archive assets at 256 MiB, and interrupted-save recovery records
+at 128; interrupted-save journals are separate from rolling draft retention.
 
 Imported gist provenance is optional normalized `id[/revision]` metadata
 (32–40 lowercase hexadecimal ID characters and an optional 40-character revision).
@@ -186,7 +201,8 @@ this does not establish compatibility with a particular older distribution.
 
 1. Build the core source pinned in `src-tauri/core-revision`. The optional
    `MUZPAD_CORE_REVISION` environment variable must match that full SHA exactly.
-   Both executables embed the pin; runtime never consults a source checkout.
+   Both executables embed the pin; runtime does not compile engine source from a
+   checkout. An installed contributed module/asset root may come from a checkout.
 2. Build the child with
    `cargo build --manifest-path src-tauri/Cargo.toml --no-default-features --bin muzpad-engine --release`.
 3. Copy `src-tauri/target/release/muzpad-engine` to
@@ -199,6 +215,13 @@ this does not establish compatibility with a particular older distribution.
    library remains embedded in core. Do not copy `contrib/**/assets/`, installed
    plugin binaries or user preset/sample libraries without redistribution rights;
    absent external resources produce explicit dependency/grant errors.
+   External contributed roots use the first existing directory in this order:
+   `MUZ_CONTRIB_DIR`, sibling `../../muz-core/contrib` relative to the build-time
+   `src-tauri` manifest directory, then absolute `$XDG_DATA_HOME/muz/contrib`
+   or `$HOME/.local/share/muz/contrib`. The selected root is canonicalized and
+   granted as `contrib`; bundled contributed text is used when none exists.
+   Declaring-module-relative SFZ/sample paths retain existing linked-root and
+   consumed-dependency authorization. Imported previews still require trust.
 5. Produce `dist/` with the shared production build, then build/package the default
    shell feature with the Tauri CLI using `src-tauri/tauri.conf.json`.
    The configuration intentionally has no development-server URL: development

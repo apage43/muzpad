@@ -59,6 +59,7 @@ let catalog: Catalog,
 let acceptedRef: RevisionRef | null = null;
 let buildAbort: AbortController | undefined;
 let activeBuildRequest: string | null = null;
+let pendingPlayback: { label: string; reason: string } | undefined;
 let folderWatch: Extract<ProjectEvent, { kind: "watch" }> | undefined;
 let analysisSource: string | null = null;
 let analysisFrame: AnalysisFrame | undefined;
@@ -171,7 +172,7 @@ $("app").innerHTML = `
   <section class="source-pane"><div class="tabs" id="file-tabs"></div><div class="source-tools"><span id="source-path"></span><label class="entry-choice">Entrypoints <select id="entry-select" aria-label="Entrypoints" title="Choose the file to rebuild"></select></label><button id="format">Format</button><button id="set-entry">Use as entry</button></div><div id="entry-notice" role="status" hidden></div><div id="editor"></div><div id="requirements" hidden></div><div id="document" hidden></div><div class="source-foot"><span id="source-mode">muz source</span><span id="entry-label"></span></div></section>
   <div class="splitter" role="separator" tabindex="0" aria-label="Resize editor" aria-orientation="vertical"></div>
   <section class="visual-pane"><div class="view-tabs" role="tablist" aria-label="Inspection views"><button data-view="arrangement" role="tab" aria-selected="true">Arrangement</button><button data-view="routing" role="tab" aria-selected="false">Routing</button><button data-view="patch" role="tab" aria-selected="false">Voice patch</button><button data-view="automation" role="tab" aria-selected="false">Automation</button></div><div class="visual-tools"><span id="view-caption">The music your code makes</span><span id="kit-legend" hidden></span></div><div class="arrangement-tools" id="arrangement-controls" role="toolbar" aria-label="Arrangement navigation"><button id="zoom-out" aria-label="Zoom out" title="Zoom out (−)">−</button><input id="zoom" type="range" min="0" max="9" step=".05" value="0" aria-label="Arrangement zoom"><button id="zoom-in" aria-label="Zoom in" title="Zoom in (+)">＋</button><output id="zoom-value">1×</output><button id="zoom-fit" title="Fit the entire arrangement (Home)">Fit</button><button id="center-playhead" title="Center the view on the playhead">Center playhead</button><button id="follow" aria-pressed="true" title="Keep the playhead visible during playback; manual panning turns this off">Follow</button></div><div class="view-content"><div id="arrangement"></div><div id="graph-view" hidden></div></div><div class="selection-heading"><button id="toggle-inspector" aria-expanded="true" aria-controls="inspector" title="Show or hide inspector">Inspector ▾</button><span id="selection-label">Inspector</span><button id="jump-source" disabled>Open related source ↗</button></div><div id="inspector"><p class="empty">Select a track or note to inspect its performance and sound.</p></div><div class="analysis-heading"><label>Analyze <select id="analysis-source" aria-label="Analysis output"><option value="">Master</option></select></label><span id="analysis-detail">Master output</span></div><div class="analysis-strip"><div><span>Waveform</span><canvas id="scope" width="320" height="70" aria-label="Selected output waveform"></canvas></div><div><span>Spectrum</span><canvas id="spectrum" width="320" height="70" aria-label="Selected output spectrum"></canvas></div></div></section></main>
-  <footer class="diagnostics"><div class="diagnostics-heading"><span id="build-state">Starting</span><span id="build-detail">Loading muz-core</span><span id="audio-health"></span><details id="revision-effects"><summary>Revision details</summary><div id="revision-effect-list"></div></details></div><div id="diagnostic-list" role="status" aria-live="polite"></div></footer>
+  <footer class="diagnostics"><div class="diagnostics-heading"><span id="build-state">Starting</span><details id="status-details"><summary>Status details</summary><div class="status-detail-panel"><p id="build-detail">Loading muz-core</p><p id="audio-health"></p><p id="host-capabilities"></p><details id="revision-effects" hidden><summary>Revision details</summary><div id="revision-effect-list"></div></details><div id="workflow-history" role="region" aria-label="Completed action receipts"></div></div></details></div><div class="diagnostics-active"><div id="diagnostic-list" role="status" aria-live="polite"></div></div></footer>
   <input id="folder-input" type="file" webkitdirectory multiple hidden><input id="zip-input" type="file" accept=".zip" hidden>
   <dialog id="gist-dialog"><form id="gist-form"><h2>Import from gist</h2><label>Gist URL or ID<input id="gist-input" required autocomplete="off" spellcheck="false" placeholder="https://gist.github.com/…"></label><p>Open a local working copy. Share this page’s URL to share the gist; local edits are not included.</p><p id="gist-error" role="alert"></p><div><button type="button" id="gist-cancel">Cancel</button><button id="gist-submit" class="primary">Import</button></div></form></dialog>
   <dialog id="file-dialog"><form method="dialog"><h2>Add a source file</h2><label>Project-relative filename<input id="new-file-name" value="part.muz" required></label><p id="file-error"></p><div><button value="cancel">Cancel</button><button id="create-file" class="primary" value="create">Create file</button></div></form></dialog>`;
@@ -197,8 +198,15 @@ document.querySelector(".visual-tools")!.insertAdjacentHTML("beforeend", '<butto
 $("editor").insertAdjacentHTML("beforebegin", '<div id="source-empty" hidden><h2>No file open</h2><p>Your buffers and accepted music are still here.</p><button id="open-entrypoint">Open entrypoint</button><button id="show-explorer">Show explorer</button></div>');
 $("diagnostic-list").insertAdjacentHTML("afterend", '<div id="recovery-status" hidden></div>');
 document.querySelector(".transport")!.insertAdjacentHTML("afterend", '<div class="surface-toolbar" role="toolbar" aria-label="Workspace surface"><button id="explorer-drawer" aria-expanded="false" aria-controls="explorer-pane">Explorer</button><button id="surface-source" aria-pressed="true">Source</button><button id="surface-music" aria-pressed="false">Music</button></div>');
-document.querySelector(".diagnostics-heading")!.insertAdjacentHTML("beforeend", '<button id="restart-engine" hidden>Restart engine</button><span id="host-capabilities"></span>');
+document.querySelector(".diagnostics-heading")!.insertAdjacentHTML("beforeend", '<button id="restart-engine" hidden>Restart engine</button>');
 $("diagnostic-list").insertAdjacentHTML("beforebegin", '<div id="workflow-status" role="region" aria-label="Independent action outcomes"></div><span id="workflow-announcement" class="sr-only" role="status" aria-live="polite"></span>');
+$("recent-projects").insertAdjacentHTML("afterend", '<button id="project-recovery" disabled>Recovery copies (0)…</button>');
+$("status-details").addEventListener("keydown", event => {
+  if (event.key !== "Escape") return;
+  $<HTMLDetailsElement>("status-details").open = false;
+  $("status-details").querySelector<HTMLElement>("summary")!.focus();
+  event.stopPropagation();
+});
 document.querySelector(".visual-pane")!.insertAdjacentHTML("afterbegin", '<div id="displayed-music-context" role="status" hidden></div>');
 $("entry-notice").insertAdjacentHTML("afterend", '<div id="entry-classification" role="status"></div><button id="trust-and-run" hidden>Trust and run…</button><button id="cancel-entry-scan" hidden>Cancel entry scan</button>');
 document.querySelector(".selection-heading")!.insertAdjacentHTML("afterbegin", '<select id="track-select" aria-label="Inspect track"><option value="">No accepted tracks</option></select>');
@@ -206,7 +214,7 @@ document.querySelector(".arrangement-tools")!.insertAdjacentHTML("beforeend", '<
 document.addEventListener("pointerdown", event => {
   const target = event.target;
   if (!(target instanceof Node)) return;
-  for (const menu of document.querySelectorAll<HTMLDetailsElement>(".command-menu[open], #transport-overflow[open]")) {
+  for (const menu of document.querySelectorAll<HTMLDetailsElement>(".command-menu[open], #transport-overflow[open], #status-details[open]")) {
     if (menu === transportOverflow && !narrowWorkspace.matches) continue;
     if (!menu.contains(target)) menu.open = false;
   }
@@ -331,22 +339,28 @@ function updateEntryChoices() {
   const declared = project.entries?.includes(project.entry) ? "Declared and selected" : "Selected";
   const reason = !projectFile(project.entry) ? "Source file is missing; select another candidate or restore it."
     : !/\.muz$/i.test(project.entry) ? "This declaration is not a .muz source entry; Rebuild will report the selected entry's typed failure. Select a source alternative explicitly."
-    : result ? `${result.kind} · readiness ${result.readiness.kind}. ${result.failure?.message ?? (result.readiness.kind === "blocked" ? result.readiness.failure.message : result.description ?? "Classification does not certify playback; Rebuild validates and applies music.")}`
+    : result?.readiness.kind === "validated" ? "Ready to play."
+    : result ? `${result.kind}. ${result.failure?.message ?? (result.readiness.kind === "blocked" ? result.readiness.failure.message : "Rebuild to load audio.")}`
     : previous ? `Current source is unchecked; previous ${previous.kind} classification is stale.` : "Not classified.";
   const buildReason = attempt?.entry === project.entry ? ` Last Rebuild ${attempt.outcome}: ${attempt.summary}` : "";
-  $("entry-classification").textContent = `${declared}: ${project.entry}. ${reason}${buildReason}${entryScanPending ? ` Checking entries${entryScanProgress ? ` · ${entryScanProgress}` : "…"}; previous results are stale.` : entryScanProgress ? ` ${entryScanProgress}` : ""}`;
+  $("entry-classification").textContent = `${declared}: ${project.entry}. ${reason}${buildReason}${entryScanPending ? busy ? " Entry scan waits for Rebuild." : ` Checking entries${entryScanProgress ? ` · ${entryScanProgress}` : "…"}; previous results are stale.` : entryScanProgress ? ` ${entryScanProgress}` : ""}`;
   $("cancel-entry-scan").hidden = !entryScanPending;
   $("trust-and-run").hidden = project.execution.trusted;
 }
-function scheduleEntryScan(delay = 600) {
+function stopEntryScan() {
   clearTimeout(entryScanTimer);
-  entryScanAbort?.abort();
+  entryScanAbort?.abort(); entryScanAbort = undefined;
+  entryScanToken++;
   entryScanRequest = null; entryScanSnapshot = null; entryScanSource = undefined;
-  const token = ++entryScanToken;
-  entryScanProgress = "";
+  entryScanPending = false; entryScanProgress = "";
+}
+function scheduleEntryScan(delay = 600) {
+  stopEntryScan();
+  const token = entryScanToken;
   if (!project.execution.trusted) { entryScanPending = false; updateEntryChoices(); return; }
   entryScanPending = true;
   updateEntryChoices();
+  if (busy) return;
   const controller = new AbortController();
   entryScanAbort = controller;
   entryScanTimer = window.setTimeout(async () => {
@@ -354,16 +368,20 @@ function scheduleEntryScan(delay = 600) {
     const scanOperation = operation(controller.signal);
     entryScanRequest = scanOperation.requestId;
     try {
+      const knownSong = acceptedRef?.project === captured.project && acceptedRef.epoch === captured.epoch && acceptedRef.sourceVersion === captured.sourceVersion
+        ? currentClassification(acceptedRef.entry) : undefined;
+      const validatedSong = knownSong?.readiness.kind === "validated" ? knownSong : undefined;
+      const candidates = [...new Set([...(project.entries ?? []), project.entry, ...project.files.filter(f => !f.deleted && /\.muz$/i.test(f.path)).map(f => f.path).sort()])].filter(path => !!projectFile(path) && /\.muz$/i.test(path) && path !== validatedSong?.entry);
+      if (!candidates.length) { entryScanProgress = validatedSong ? "" : "No existing .muz source candidates to classify; declared choices remain visible."; return; }
       const snapshot = await host.projects.snapshotSources(captured, operation(controller.signal));
       if (token !== entryScanToken || controller.signal.aborted) return;
       entryScanSnapshot = snapshot.id;
       entryScanSource = captured;
-      const candidates = [...new Set([...(project.entries ?? []), project.entry, ...project.files.filter(f => !f.deleted && /\.muz$/i.test(f.path)).map(f => f.path).sort()])].filter(path => !!projectFile(path) && /\.muz$/i.test(path));
-      if (!candidates.length) { entryScanProgress = "No existing .muz source candidates to classify; declared choices remain visible."; return; }
       const result = await runtime.checkEntries({ snapshot: snapshot.id, entries: candidates }, scanOperation);
       if (token !== entryScanToken || captured.project !== project.project || captured.epoch !== project.epoch || result.snapshot !== snapshot.id || result.sourceVersion !== project.sourceVersion) return;
       entryResults = Object.fromEntries(result.entries.map(entry => [entry.entry, classifiedEntry(acceptedRef?.project === captured.project && acceptedRef.epoch === captured.epoch && acceptedRef.entry === entry.entry && acceptedRef.sourceVersion === captured.sourceVersion ? { ...entry, readiness: { kind: "validated" as const } } : entry, captured)]));
-      entryScanProgress = "Classification complete; readiness remains separate from accepted playback.";
+      if (validatedSong) entryResults[validatedSong.entry] = classifiedEntry(validatedSong, captured);
+      entryScanProgress = "";
     } catch (e) {
       if (token === entryScanToken) {
         entryScanProgress = controller.signal.aborted ? "Scan cancelled; previous results retained as stale." : "Scan failed; previous results retained as stale.";
@@ -374,7 +392,7 @@ function scheduleEntryScan(delay = 600) {
     }
   }, delay);
 }
-$("cancel-entry-scan").onclick = () => { clearTimeout(entryScanTimer); entryScanAbort?.abort(); entryScanToken++; entryScanRequest = null; entryScanSnapshot = null; entryScanSource = undefined; entryScanPending = false; entryScanProgress = "Scan cancelled; previous results are stale."; updateEntryChoices(); };
+$("cancel-entry-scan").onclick = () => { stopEntryScan(); entryScanProgress = "Scan cancelled; previous results are stale."; updateEntryChoices(); };
 $("trust-and-run").onclick = async () => {
   const workspace = document.querySelector<HTMLElement>(".workspace")!;
   workspace.inert = true;
@@ -752,18 +770,22 @@ function statusSourceAvailable(issue: ActionStatus): boolean {
 }
 const renderedOutcomes = new WeakMap<HTMLElement, string>();
 function renderWorkflowStatus() {
-  const region = $("workflow-status");
-  const expanded = new Set([...region.querySelectorAll<HTMLDetailsElement>("details[open]")].map(node => node.dataset.request));
-  const focused = region.contains(document.activeElement) ? document.activeElement as HTMLElement : null;
-  const focusedRequest = focused?.closest<HTMLDetailsElement>("details[data-request]")?.dataset.request;
-  const focusedOpenError = focused?.dataset.openError;
+  const region = $("workflow-status"), history = $("workflow-history");
+  const regions = [region, history];
+  const expanded = new Set(regions.flatMap(container => [...container.querySelectorAll<HTMLDetailsElement>("details[open]")].map(node => node.dataset.request)));
+  const focused = regions.some(container => container.contains(document.activeElement)) ? document.activeElement as HTMLElement : null;
+  const focusedRequest = focused?.closest<HTMLElement>("[data-action-request]")?.dataset.actionRequest;
+  const focusedControl = focused?.hasAttribute("data-copy-request") ? "[data-copy-request]"
+    : focused?.hasAttribute("data-open-error") ? "[data-open-error]"
+    : focused?.hasAttribute("data-acknowledge") ? "[data-acknowledge]" : focused?.tagName.toLowerCase();
   const owners = visibleStatusOwners();
   const outcomes = [...new Map(owners.flatMap(owner => [...owner.issues.values(), ...owner.channels.values()]).map(issue => [issue.requestId, issue])).values()];
-  const existing = new Map([...region.querySelectorAll<HTMLElement>("section[data-action-request]")].map(node => [node.dataset.actionRequest, node]));
+  const existing = new Map(regions.flatMap(container => [...container.querySelectorAll<HTMLElement>("section[data-action-request]")].map(node => [node.dataset.actionRequest, node] as const)));
   const nextNodes = outcomes.map(issue => {
     const previousWorkspace = !!issue.origin && (issue.origin.project !== project?.project || issue.origin.epoch !== project?.epoch);
     const archived = owners.some(owner => owner.issues.has(issue.requestId));
-    const markup = `<section class="action-status" data-action-request="${esc(issue.requestId)}" data-outcome="${issue.outcome}"><strong>${esc(issue.action)} · ${esc(issue.outcome)}</strong>${previousWorkspace ? `<span>Originating workspace: ${esc(issue.origin!.title)}.</span>` : ""}<span>${esc(issue.summary)}</span><p><span data-usable-facts data-workspace-facts="${previousWorkspace ? "current" : "origin"}"></span> ${esc(issue.nextAction)}</p>${issue.location ? `<button data-open-error="${esc(issue.requestId)}" ${statusSourceAvailable(issue) ? "" : 'disabled title="This diagnostic belongs to another project; return to that project to open its source."'}>Open error</button>` : ""}${archived ? `<button data-acknowledge="${esc(issue.requestId)}">Acknowledge outcome</button>` : ""}${issue.technical !== undefined ? `<details data-request="${esc(issue.requestId)}"><summary>Technical diagnostics</summary><button data-copy-request="${esc(issue.requestId)}">Copy diagnostics</button><pre tabindex="0">${esc(technicalDetails(issue.technical))}</pre></details>` : ""}</section>`;
+    const actionable = ["failed", "rejected", "partial", "unknown"].includes(issue.outcome);
+    const markup = `<section class="action-status" data-action-request="${esc(issue.requestId)}" data-outcome="${issue.outcome}"><strong>${esc(issue.action)} · ${esc(issue.outcome)}</strong> ${previousWorkspace ? `<span>Originating workspace: ${esc(issue.origin!.title)}.</span> ` : ""}<span>${esc(issue.summary)}</span>${actionable ? `<p>${esc(issue.nextAction)}</p>` : ""}${issue.location ? `<button data-open-error="${esc(issue.requestId)}" ${statusSourceAvailable(issue) ? "" : 'disabled title="This diagnostic belongs to another project; return to that project to open its source."'}>Open error</button>` : ""}${archived ? `<button data-acknowledge="${esc(issue.requestId)}">Acknowledge outcome</button>` : ""}<details data-request="${esc(issue.requestId)}"><summary>Technical diagnostics</summary><p><span data-usable-facts data-workspace-facts="${previousWorkspace ? "current" : "origin"}"></span>${actionable ? "" : ` ${esc(issue.nextAction)}`}</p>${issue.technical !== undefined ? `<button data-copy-request="${esc(issue.requestId)}">Copy diagnostics</button><pre tabindex="0">${esc(technicalDetails(issue.technical))}</pre>` : ""}</details></section>`;
     const retained = existing.get(issue.requestId);
     if (retained && renderedOutcomes.get(retained) === markup) return retained;
     const template = document.createElement("template");
@@ -774,13 +796,18 @@ function renderWorkflowStatus() {
     renderedOutcomes.set(node, markup);
     return node;
   });
-  nextNodes.forEach((node, index) => {
-    if (region.children[index] !== node) region.insertBefore(node, region.children[index] ?? null);
-  });
+  for (const container of regions) {
+    const nodes = nextNodes.filter(node => (node.dataset.outcome === "pending" || ["failed", "rejected", "partial", "unknown"].includes(node.dataset.outcome!)) === (container === region));
+    nodes.forEach((node, index) => {
+      if (container.children[index] !== node) container.insertBefore(node, container.children[index] ?? null);
+    });
+  }
   const retainedNodes = new Set(nextNodes);
-  for (const node of [...region.children]) if (!retainedNodes.has(node as HTMLElement)) node.remove();
-  for (const facts of region.querySelectorAll<HTMLElement>("[data-usable-facts]"))
-    facts.textContent = `${facts.dataset.workspaceFacts === "current" ? "Current workspace: " : ""}${usableFacts()}`;
+  for (const container of regions) {
+    for (const node of [...container.children]) if (!retainedNodes.has(node as HTMLElement)) node.remove();
+    for (const facts of container.querySelectorAll<HTMLElement>("[data-usable-facts]"))
+      facts.textContent = `${facts.dataset.workspaceFacts === "current" ? "Current workspace: " : ""}${usableFacts()}`;
+  }
   const retainedIds = new Set(outcomes.map(issue => issue.requestId));
   for (const id of announcedOutcomes.keys()) if (!retainedIds.has(id)) announcedOutcomes.delete(id);
   const announcements: string[] = [];
@@ -792,21 +819,20 @@ function renderWorkflowStatus() {
     }
   }
   if (announcements.length) $("workflow-announcement").textContent = announcements.join(" ");
-  if (focused) {
-    const replacement = focusedRequest
-      ? [...region.querySelectorAll<HTMLDetailsElement>("details[data-request]")].find(node => node.dataset.request === focusedRequest)?.querySelector<HTMLElement>(focused.tagName === "BUTTON" ? "button" : "summary")
-      : [...region.querySelectorAll<HTMLElement>("[data-open-error]")].find(node => node.dataset.openError === focusedOpenError);
-    replacement?.focus({ preventScroll: true });
+  if (focused && (!focused.isConnected || !focused.getClientRects().length)) {
+    const receipt = nextNodes.find(node => node.dataset.actionRequest === focusedRequest);
+    const replacement = focusedControl ? receipt?.querySelector<HTMLElement>(focusedControl) : undefined;
+    (replacement?.getClientRects().length ? replacement : $("status-details").querySelector<HTMLElement>("summary"))?.focus({ preventScroll: true });
   }
-  for (const button of region.querySelectorAll<HTMLElement>("[data-copy-request]")) button.onclick = () => {
+  for (const button of regions.flatMap(container => [...container.querySelectorAll<HTMLElement>("[data-copy-request]")])) button.onclick = () => {
     const issue = outcomes.find(value => value.requestId === button.dataset.copyRequest);
     if (issue) void navigator.clipboard.writeText(technicalDetails(issue.technical)).then(() => { button.textContent = "Copied"; }).catch(() => { button.textContent = "Select diagnostics to copy"; });
   };
-  for (const button of region.querySelectorAll<HTMLElement>("[data-open-error]")) button.onclick = () => {
+  for (const button of regions.flatMap(container => [...container.querySelectorAll<HTMLElement>("[data-open-error]")])) button.onclick = () => {
     const issue = outcomes.find(value => value.requestId === button.dataset.openError);
     if (issue && statusSourceAvailable(issue)) void jump(issue.location);
   };
-  for (const button of region.querySelectorAll<HTMLElement>("[data-acknowledge]")) button.onclick = () => { for (const owner of owners) owner.issues.delete(button.dataset.acknowledge!); renderWorkflowStatus(); };
+  for (const button of regions.flatMap(container => [...container.querySelectorAll<HTMLElement>("[data-acknowledge]")])) button.onclick = () => { for (const owner of owners) owner.issues.delete(button.dataset.acknowledge!); renderWorkflowStatus(); };
 }
 function error(e: unknown, action = "Operation", channel: StatusChannel = "operation", ticket?: OwnedAction, background = false) {
   const failure = describeActionFailure(e);
@@ -833,16 +859,18 @@ function showProjectFailure(event: Extract<ProjectEvent, { kind: "failure" }>) {
   error(event.failure, channel === "recovery" ? "Preserve recovery copy" : channel === "save" ? "Save" : "Refresh project", channel, undefined, true);
 }
 function updateRevision() {
+  const acceptedLabel = runtime.capabilities.environment === "desktop" ? "Music" : `Revision ${acceptedRef?.revision}`;
+  $("revision").title = acceptedRef ? `Accepted revision ${acceptedRef.revision} · ${acceptedEntry}` : "";
   $("revision").textContent =
     acceptedRef && acceptedRef.project !== project.project
-      ? `Previous project · revision ${acceptedRef.revision} loaded`
+      ? `Previous project · ${acceptedLabel.toLowerCase()} loaded`
       : accepted < 0
         ? "Not built yet"
         : !acceptedRef
           ? `Engine stopped · last entry ${acceptedEntry}`
           : accepted === revision
-            ? `Revision ${acceptedRef.revision} accepted`
-            : `Edited · revision ${acceptedRef.revision} accepted`;
+            ? `${acceptedLabel} accepted`
+            : `Edited · ${acceptedLabel.toLowerCase()} accepted`;
   $("revision").classList.toggle("dirty", revision !== accepted);
   const entryPending = accepted >= 0 && project.entry !== acceptedEntry;
   $("entry-notice").hidden = !entryPending;
@@ -896,7 +924,8 @@ function retireAcceptedMusic() {
   $("analysis-detail").textContent = "Master output";
   $("track-select").innerHTML = '<option value="">No accepted tracks</option>';
   $("loop").setAttribute("aria-pressed", "false");
-  $("play").setAttribute("disabled", ""); $("stop").setAttribute("disabled", "");
+  pendingPlayback = undefined;
+  refreshPlayControl(); $("stop").setAttribute("disabled", "");
   $("section").innerHTML = '<option value="">Sections</option>';
   $("clock").textContent = "0:00"; $("length").textContent = "/ —";
   $("jump-source").setAttribute("disabled", "");
@@ -1404,6 +1433,10 @@ function attachInitialPageControls() {
 async function run(ownership: "explicit" | "background" = "explicit") {
   if (busy || !project || !engineAvailable || !project.execution.trusted) return;
   busy = true;
+  const scanPending = entryScanPending;
+  stopEntryScan();
+  entryScanPending = scanPending;
+  updateEntryChoices();
   buildAbort = new AbortController();
   const token = ++runToken;
   const buildOperation = operation(buildAbort.signal);
@@ -1415,7 +1448,7 @@ async function run(ownership: "explicit" | "background" = "explicit") {
   $("run").setAttribute("disabled", "");
   $("cancel").hidden = false;
   $("cancel").removeAttribute("disabled");
-  message("Compiling", project.entry);
+  showBuildProgress("Capturing", "Capturing working source buffers.");
   try {
     const snapshot = await host.projects.snapshotSources(captured, operation(buildAbort.signal));
     if (token !== runToken) {
@@ -1441,7 +1474,10 @@ async function run(ownership: "explicit" | "background" = "explicit") {
     if (token === runToken) {
       commitInProgress = false; busy = false; buildAbort = undefined;
       activeBuildRequest = null;
+      pendingPlayback = undefined;
+      refreshPlayControl();
       $("run").removeAttribute("disabled"); $("cancel").hidden = true;
+      if (entryScanPending) scheduleEntryScan(0);
     }
   }
 }
@@ -1470,7 +1506,8 @@ async function acceptRevision(result: AcceptedRevision) {
   accepted = result.ref.sourceVersion;
   acceptedEntry = result.ref.entry;
   exporter.set({ ...result, name: project.title });
-  $("play").removeAttribute("disabled");
+  pendingPlayback = undefined;
+  refreshPlayControl();
   $("stop").removeAttribute("disabled");
   $("export-media").removeAttribute("disabled");
   updateRevision();
@@ -1479,7 +1516,7 @@ async function acceptRevision(result: AcceptedRevision) {
   $("displayed-music-context").hidden = true;
   $("length").textContent = `/ ${time(status.duration)}`;
   updateTransport(status);
-  message("Accepted", `Music updated · revision ${result.ref.revision}`);
+  message("Accepted", "Ready to play · loading arrangement");
   renderWorkflowStatus();
   const current = inspection;
   try {
@@ -2343,12 +2380,29 @@ $("zip-input").onchange = async () => {
     error(e, "Import project ZIP", "operation", ticket);
   }
 };
+function refreshPlayControl(capabilities = runtime.capabilities) {
+  const disabled = !acceptedRef || !capabilities.audio.available || !engineAvailable;
+  $("play").toggleAttribute("disabled", disabled);
+  $("play").textContent = disabled && busy && pendingPlayback && engineAvailable && capabilities.audio.available
+    ? `${pendingPlayback.label}…`
+    : acceptedRef && status?.playing ? "Ⅱ Pause" : "▶ Play";
+  $("play").title = !engineAvailable ? "The audio engine is unavailable. Restart engine to load music."
+    : !capabilities.audio.available ? capabilities.audio.reason ?? "Audio output is unavailable."
+    : !acceptedRef ? busy && pendingPlayback ? pendingPlayback.reason : project && !project.execution.trusted ? "Trust and run this preview to load audio." : "Rebuild to load audio."
+    : busy ? "Play the last accepted music while the new audio is prepared."
+    : status?.playing ? "Pause playback" : "Play accepted music";
+}
+function showBuildProgress(label: string, reason: string) {
+  pendingPlayback = { label, reason };
+  message(label, `${reason} ${acceptedRef ? "Previous music is still playable." : "Play becomes available when audio is ready."}`);
+  refreshPlayControl();
+}
 function updateTransport(data: TransportStatus) {
   const identity = revisionIdentity(data.ref);
   if (!acceptedRef || identity !== revisionIdentity(acceptedRef)) return;
   if (status && revisionIdentity(status.ref) === identity && olderObservation(data, status)) return;
   status = data;
-  $("play").textContent = data.playing ? "Ⅱ Pause" : "▶ Play";
+  refreshPlayControl();
   $("loop").setAttribute("aria-pressed", String(!!data.loop));
   arrangement.position(data.beat, data.playing);
   arrangement.meters(data.playing ? data.meters.map(m => ({ id: m.track, peak: m.peak })) : []);
@@ -2431,7 +2485,7 @@ function applyCapabilities(capabilities: HostCapabilities) {
     ? `${capabilities.platform} · native ${capabilities.nativePluginFormats.join(" / ") || "built-ins"}`
     : "Web · built-in instruments";
   $("host-capabilities").title = [capabilities.audio.reason, capabilities.filesystem.watch.reason, capabilities.pluginConfig?.label].filter(Boolean).join(" · ");
-  $("play").toggleAttribute("disabled", !acceptedRef || !capabilities.audio.available || !engineAvailable);
+  refreshPlayControl(capabilities);
   $("panic").toggleAttribute("disabled", !acceptedRef || !engineAvailable);
   for (const id of ["restart", "section", "loop", "apply-loop", "seek-beat-apply", "track-select"])
     $(id).toggleAttribute("disabled", !acceptedRef || !engineAvailable || (project && acceptedRef.project !== project.project));
@@ -2502,7 +2556,12 @@ runtime.subscribe(event => {
   } else if (event.kind === "build" && event.requestId === activeBuildRequest && project && event.project.project === project.project && event.project.epoch === project.epoch) {
     commitInProgress = event.phase === "applying";
     $("cancel").hidden = !busy || commitInProgress;
-    if (busy) message(event.phase[0].toUpperCase() + event.phase.slice(1), project.entry);
+    if (busy) switch (event.phase) {
+      case "queued": showBuildProgress("Queued", "Waiting for the previous audio update."); break;
+      case "compiling": showBuildProgress("Compiling", `Compiling ${project.entry}.`); break;
+      case "preparing": showBuildProgress("Loading audio", "Loading instruments, samples and plugin state; preparing audio."); break;
+      case "applying": showBuildProgress("Applying", "Waiting for the audio engine to acknowledge the update."); break;
+    }
   }
 });
 $("panic").onclick = () => { void transport({ kind: "panic" }); };
@@ -2557,7 +2616,8 @@ try {
         if (project.conflicts.length) void resolveConflicts().catch(error);
       }).catch(error);
     } else if (event.kind === "recovery") {
-      offers.set(event.offer.id, event.offer);
+      offers.clear();
+      for (const offer of event.offers) offers.set(offer.id, offer);
       renderRecoveryOffers();
     } else if (event.kind === "failure") {
       if (!project || (event.project && (event.project.project !== project.project || event.project.epoch !== project.epoch))) {
@@ -2572,27 +2632,25 @@ try {
     }
   });
   function renderRecoveryOffers() {
-    document.getElementById("recovery-offers")?.remove();
-    if (!offers.size) return;
-    const region = document.createElement("div");
-    region.id = "recovery-offers";
-    for (const offer of offers.values()) {
-      const button = document.createElement("button");
-      button.textContent = offer.id === "muzpad-previous-v1" ? "Previous workspace" : `Recover ${offer.title}`;
-      button.onclick = async () => {
-        try {
-          const answer = await ask("Recover working buffers?", `<p>${esc(offer.title)}${offer.rootLabel ? ` · ${esc(offer.rootLabel)}` : ""}</p><p>Restore recovered text or discard this recovery. Undo and view history are not stored across launches.</p>`, [["restore", "Restore"], ["discard", "Discard recovery"], ["cancel", "Cancel"]]);
-          if (answer === "cancel") return;
-          if (answer === "restore") {
-            if (!await replaceProject(() => host.projects.restoreRecovery({ id: offer.id, action: "restore" }, operation()))) return;
-          } else await host.projects.restoreRecovery({ id: offer.id, action: "discard" }, operation());
-          offers.delete(offer.id); renderRecoveryOffers();
-        } catch (e) { error(e, "Restore recovery", "recovery"); }
-      };
-      region.append(button);
-    }
-    document.querySelector(".diagnostics")!.append(region);
+    $("project-recovery").textContent = `Recovery copies (${offers.size})…`;
+    $("project-recovery").toggleAttribute("disabled", !offers.size);
   }
+  $("project-recovery").onclick = async () => {
+    if (!offers.size) return;
+    try {
+      let selectedId = offers.keys().next().value!;
+      const options = [...offers.values()].map(offer => `<label class="recovery-offer"><input type="radio" name="recovery-copy" value="${esc(offer.id)}" ${offer.id === selectedId ? "checked" : ""}><span><strong>${esc(offer.id === "muzpad-previous-v1" ? `Previous workspace · ${offer.title}` : offer.title)}</strong><span>${esc(offer.rootLabel ?? "Disconnected copy")}</span><small>${esc(offer.id)}</small></span></label>`).join("");
+      const answer = await ask(`Recovery copies (${offers.size})`,
+        `<p>Select a recovery copy to restore its working buffers or discard it. Recovery is not a disk save. Undo and view history are not stored across launches.</p><fieldset id="recovery-offers"><legend>Recovery copy</legend>${options}</fieldset>`,
+        [["restore", "Restore"], ["discard", "Discard recovery"], ["cancel", "Cancel"]],
+        () => { selectedId = document.querySelector<HTMLInputElement>('#recovery-offers input:checked')!.value; });
+      if (answer === "cancel" || !offers.has(selectedId)) return;
+      if (answer === "restore") {
+        if (!await replaceProject(() => host.projects.restoreRecovery({ id: selectedId, action: "restore" }, operation()))) return;
+      } else await host.projects.restoreRecovery({ id: selectedId, action: "discard" }, operation());
+      offers.delete(selectedId); renderRecoveryOffers();
+    } catch (e) { error(e, "Restore recovery", "recovery"); }
+  };
   starting = false;
   const requested = new URL(location.href).searchParams.get("gist");
   if (requested !== null) {

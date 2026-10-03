@@ -800,7 +800,12 @@ export async function createDesktopHostWithBridge(bridge: DesktopBridge): Promis
           if (currentSourceVersion !== null && event.snapshot.sourceVersion < currentSourceVersion) return;
           setProject(event.snapshot); lastProject = event; break;
         case 'watch': projectRef(event.project); ensure(sameProject(event.project, currentProject), 'Stale project watch.', 'stale_request'); break;
-        case 'recovery': object(event.offer); id(event.offer.id); recoveries.set(event.offer.id, event.offer); break;
+        case 'recovery':
+          ensure(Array.isArray(event.offers), 'Invalid recovery offers.');
+          for (const offer of event.offers) { object(offer); id(offer.id); }
+          recoveries.clear();
+          for (const offer of event.offers) recoveries.set(offer.id, offer);
+          break;
         case 'failure': validateFailure(event.failure); break;
         default: throw failure('protocol_mismatch', 'Unknown project event.');
       }
@@ -1109,7 +1114,7 @@ export async function createDesktopHostWithBridge(bridge: DesktopBridge): Promis
     subscribe(listener) {
       ensure(!disposed, 'Host is disposed.', 'stale_request'); projectListeners.add(listener);
       if (lastProject) emit(new Set([listener]), lastProject);
-      for (const offer of recoveries.values()) emit(new Set([listener]), { kind: 'recovery', offer });
+      if (recoveries.size) emit(new Set([listener]), { kind: 'recovery', offers: [...recoveries.values()] });
       return () => { projectListeners.delete(listener); };
     },
   };

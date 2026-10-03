@@ -528,9 +528,9 @@ test("playing desktop loop can be disabled and Panic invoked from the real narro
   await expect(page.locator("#loop")).toHaveAttribute("aria-pressed", "false");
   await expect(page.locator("#play")).toHaveText("Ⅱ Pause");
   await page.setViewportSize({ width: 1440, height: 900 });
+  await page.locator("#status-details > summary").click();
   const loopReceipt = page.locator(".action-status").filter({ hasText: "Set loop · applied" });
   await expect(loopReceipt).not.toHaveAttribute("data-action-request", oldLoop!);
-  await expect(loopReceipt).toContainText("receipt observed playback running");
   await loopReceipt.locator("details > summary").click();
   const actualLoop = JSON.parse((await loopReceipt.locator("pre").textContent())!);
   expect(actualLoop.command).toEqual({ kind: "loop", range: null });
